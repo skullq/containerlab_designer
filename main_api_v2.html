@@ -1,0 +1,564 @@
+<!DOCTYPE html>
+<html>
+    <head>
+        <meta charset="utf-8">
+        <title>next_ui - Containerlab Topology Designer</title>
+        <link rel="stylesheet" href="next_sources/css/next.css">
+        <link rel="stylesheet" href="styles_main_page.css">
+        <script src="next_sources/js/next.js"></script>
+        <!-- Use new API-aware version -->
+        <script src="next_app_v2.js"></script>
+        <style>
+            body {
+                font-family: Arial, sans-serif;
+                margin: 0;
+                background: #f3f5f7;
+                color: #1f2937;
+                min-height: 100vh;
+                display: flex;
+                flex-direction: column;
+                overflow: hidden;
+            }
+            .header {
+                background: #ffffff;
+                border-bottom: 1px solid #ddd;
+                padding: 10px 14px;
+                margin-bottom: 0;
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+            }
+            .header-left h1 {
+                margin: 0;
+                font-size: 18px;
+                line-height: 1.2;
+            }
+            .header-left p {
+                margin: 4px 0 0;
+                color: #64748b;
+                font-size: 12px;
+            }
+            #lab-status-bar {
+                display: flex;
+                flex-direction: column;
+                align-items: flex-end;
+                gap: 4px;
+                font-size: 12px;
+                color: #374151;
+                margin-left: 16px;
+            }
+            .lab-status-item {
+                display: flex;
+                align-items: center;
+                gap: 4px;
+            }
+            .lab-dot {
+                display: inline-block;
+                width: 10px;
+                height: 10px;
+                border-radius: 50%;
+                flex-shrink: 0;
+            }
+            .dot-green { background: #22c55e; box-shadow: 0 0 5px #16a34a88; }
+            .dot-red   { background: #ef4444; }
+            .controls {
+                display: flex;
+                gap: 8px;
+                flex-wrap: wrap;
+                margin: 0;
+                padding: 8px 10px;
+                position: sticky;
+                top: 0;
+                z-index: 1200;
+                background: rgba(243,245,247,0.95);
+                backdrop-filter: blur(6px);
+                border-bottom: 1px solid #e5e7eb;
+            }
+            .control-section {
+                border: 1px solid #ddd;
+                padding: 8px;
+                border-radius: 4px;
+                background: #ffffff;
+                display: flex;
+                align-items: center;
+                gap: 6px;
+                flex-wrap: wrap;
+            }
+            .control-section h4 {
+                margin: 0 8px 0 0;
+                font-size: 11px;
+                text-transform: uppercase;
+                color: #64748b;
+                letter-spacing: 0.04em;
+            }
+            button {
+                padding: 6px 10px;
+                background: #2196F3;
+                color: white;
+                border: none;
+                border-radius: 4px;
+                cursor: pointer;
+                font-size: 12px;
+            }
+            button:hover {
+                background: #1976D2;
+            }
+            button.danger {
+                background: #f44336;
+            }
+            button.danger:hover {
+                background: #d32f2f;
+            }
+            button.secondary {
+                background: #9e9e9e;
+            }
+            button.secondary:hover {
+                background: #757575;
+            }
+            /* ---- Topology focus dimming ---- */
+            #topology.topo-focus-mode .topo-dim { opacity: 0.13; }
+            #topology.topo-focus-mode .topo-focal { opacity: 1; }
+
+            /* ---- Compact node tooltip content ---- */
+            .ctt-wrap {
+                width: 220px !important;
+                padding: 8px !important;
+                font-size: 11px !important;
+                line-height: 1.4 !important;
+                color: #000 !important;
+                min-height: auto !important;
+                box-sizing: border-box !important;
+                background: #ffffff !important;
+                border-radius: 4px !important;
+                overflow: visible !important;
+                display: block !important;
+            }
+            .ctt-name {
+                font-size: 13px !important;
+                font-weight: 700 !important;
+                color: #000 !important;
+                margin-bottom: 4px !important;
+                white-space: normal !important;
+                overflow: visible !important;
+                text-overflow: clip !important;
+            }
+            .ctt-info {
+                color: #333 !important;
+                font-size: 11px !important;
+                margin-bottom: 6px !important;
+                display: flex !important;
+                flex-wrap: wrap !important;
+                align-items: center !important;
+                gap: 0 2px !important;
+                overflow: visible !important;
+            }
+            .ctt-dot { color: #666 !important; margin: 0 1px !important; }
+            .ctt-sep {
+                height: 1px !important;
+                background: #ddd !important;
+                margin: 6px 0 !important;
+            }
+            .ctt-conn-hdr {
+                font-size: 10px !important;
+                font-weight: 700 !important;
+                color: #333 !important;
+                text-transform: uppercase !important;
+                letter-spacing: 0.5px !important;
+                margin-bottom: 5px !important;
+                margin-top: 3px !important;
+                overflow: visible !important;
+            }
+            .ctt-cnt { font-weight: 400 !important; }
+            .ctt-empty {
+                color: #666 !important;
+                font-style: italic !important;
+                font-size: 11px !important;
+                padding: 4px 0 !important;
+            }
+            .ctt-row {
+                display: flex !important;
+                align-items: center !important;
+                flex-wrap: wrap !important;
+                padding: 3px 0 !important;
+                border-bottom: 1px solid #eee !important;
+                font-size: 11px !important;
+                gap: 1px 2px !important;
+                overflow: visible !important;
+            }
+            .ctt-row:last-child { border-bottom: none !important; }
+            .ctt-lif {
+                font-weight: 600 !important;
+                color: #000 !important;
+                white-space: nowrap !important;
+            }
+            .ctt-arr { color: #999 !important; margin: 0 1px !important; }
+            .ctt-peer {
+                color: #0066cc !important;
+                font-weight: 600 !important;
+                white-space: nowrap !important;
+            }
+            .ctt-pif {
+                color: #666 !important;
+                font-size: 10px !important;
+                white-space: nowrap !important;
+            }
+            .topology-container {
+                margin: 8px 10px 0;
+                border: 1px solid #ddd;
+                border-radius: 4px;
+                background:
+                    linear-gradient(0deg, rgba(15, 23, 42, 0.02) 1px, transparent 1px),
+                    linear-gradient(90deg, rgba(15, 23, 42, 0.02) 1px, transparent 1px),
+                    #fbfcfd;
+                background-size: 24px 24px, 24px 24px, auto;
+                min-height: 380px;
+                flex: 1 1 auto;
+                overflow: hidden;
+            }
+            .footer {
+                padding: 4px 10px 8px;
+                border-top: 0;
+                font-size: 11px;
+                color: #6b7280;
+                background: transparent;
+            }
+            button.success {
+                background: #4CAF50;
+            }
+            button.success:hover {
+                background: #388E3C;
+            }
+            button.active-mode {
+                background: #FF9800;
+                outline: 3px solid #E65100;
+            }
+            button.active-mode:hover {
+                background: #F57C00;
+            }
+
+
+            /* Modal overlay */
+            .modal-overlay {
+                display: none;
+                position: fixed;
+                inset: 0;
+                background: rgba(0,0,0,0.45);
+                z-index: 2000;
+                justify-content: center;
+                align-items: center;
+            }
+            .modal-overlay.open {
+                display: flex;
+            }
+            .modal-box {
+                background: #fff;
+                border-radius: 8px;
+                padding: 24px 28px;
+                min-width: 360px;
+                max-width: 640px;
+                width: 90vw;
+                box-shadow: 0 8px 32px rgba(0,0,0,0.25);
+            }
+            .modal-box h3 {
+                margin: 0 0 16px 0;
+                font-size: 16px;
+                border-bottom: 1px solid #eee;
+                padding-bottom: 8px;
+            }
+            .form-row {
+                display: flex;
+                flex-direction: column;
+                margin-bottom: 12px;
+            }
+            .form-row label {
+                font-size: 12px;
+                color: #666;
+                margin-bottom: 4px;
+                font-weight: bold;
+            }
+            .form-row input, .form-row select {
+                padding: 7px 10px;
+                border: 1px solid #ccc;
+                border-radius: 4px;
+                font-size: 13px;
+            }
+            .modal-actions {
+                display: flex;
+                gap: 8px;
+                justify-content: flex-end;
+                margin-top: 16px;
+            }
+            #yaml-output {
+                width: 100%;
+                height: 320px;
+                font-family: monospace;
+                font-size: 12px;
+                border: 1px solid #ccc;
+                border-radius: 4px;
+                padding: 10px;
+                background: #f8f8f8;
+                resize: vertical;
+                box-sizing: border-box;
+            }
+
+            /* Slightly smaller Add Node modal */
+            #addNodeModal .modal-box {
+                min-width: 300px;
+                max-width: 460px;
+                width: 80vw;
+                padding: 16px 18px;
+            }
+
+            /* Slightly smaller YAML modal */
+            #yamlModal .modal-box {
+                min-width: 310px;
+                max-width: 500px;
+                width: 82vw;
+                padding: 16px 18px;
+            }
+
+            #yamlModal #yaml-output {
+                height: 220px;
+            }
+
+            /* Compact Link Interface modal */
+            #linkIfModal .modal-box {
+                min-width: 260px;
+                max-width: 340px;
+                width: 64vw;
+            }
+
+            body.link-mode-active .n-topology-tooltip {
+                display: none !important;
+                visibility: hidden !important;
+                opacity: 0 !important;
+            }
+
+            .node-context-menu {
+                display: none;
+                position: fixed;
+                min-width: 124px;
+                background: #ffffff;
+                border: 1px solid #d6d6d6;
+                border-radius: 4px;
+                box-shadow: 0 5px 14px rgba(0,0,0,0.16);
+                z-index: 2500;
+                overflow: hidden;
+            }
+            .node-context-menu.open {
+                display: block;
+            }
+            .node-context-menu button {
+                width: 100%;
+                border: 0;
+                border-radius: 0;
+                background: #fff;
+                color: #333;
+                text-align: left;
+                padding: 7px 10px;
+                font-size: 12px;
+                line-height: 1.2;
+            }
+            .node-context-menu button:hover {
+                background: #f4f8ff;
+                color: #0d47a1;
+            }
+
+            /* Keep interactions responsive even when labels overlap nodes/links */
+            .n-topology text.sourcelabel,
+            .n-topology text.targetlabel,
+            .n-topology text.node-label {
+                pointer-events: none;
+            }
+
+            #topology .n-topology text.node-label,
+            #topology .n-topology .nodeset text.node-label,
+            #topology .n-topology .node text.node-label {
+                fill: #000000 !important;
+                font-weight: 700;
+                font-size: 12px !important;
+                stroke: rgba(255, 255, 255, 0.9);
+                stroke-width: 0.8px;
+                paint-order: stroke fill;
+            }
+
+            /* Force immediate visual response for node focus/selection changes */
+            #topology .n-topology,
+            #topology .n-topology .n-topology-fit,
+            #topology .n-topology .n-topology-fit .node,
+            #topology .n-topology .n-topology-fit .nodeSet,
+            #topology .n-topology .n-topology-fit .link,
+            #topology .n-topology .n-topology-fit .linkSet,
+            #topology .n-topology .layer > * {
+                -webkit-transition: none !important;
+                transition: none !important;
+            }
+
+        </style>
+    </head>
+    <body>
+        <div class="header">
+            <div class="header-left">
+                <h1>next_ui - Containerlab Topology Designer</h1>
+                <p>Click node: details &amp; highlight &nbsp;|&nbsp; Right-click: Add Link · Delete · SSH Connect</p>
+            </div>
+            <div id="lab-status-bar">
+                <span class="lab-status-item">
+                    Lab Deployed
+                    <span id="lab-deployed-dot" class="lab-dot dot-red" title="Not deployed"></span>
+                </span>
+                <span class="lab-status-item">
+                    API ON
+                    <span id="api-on-dot" class="lab-dot dot-red" title="Static mode"></span>
+                </span>
+            </div>
+        </div>
+
+        <div class="controls">
+            <!-- Lab Lifecycle Controls -->
+            <div class="control-section">
+                <h4>Lab Control</h4>
+                <button onclick="nextUI.deployCurrentTopology()">
+                    Deploy
+                </button>
+                <button onclick="nextUI.destroyLab()" class="danger">Destroy</button>
+                <button onclick="nextUI.fetchTopology()" class="secondary">Refresh</button>
+            </div>
+
+            <!-- Topology Editor -->
+            <div class="control-section">
+                <h4>Topology Editor</h4>
+                <input id="lab-name-input" type="text" value="my-lab"
+                    style="padding:6px 8px;border:1px solid #ccc;border-radius:4px;font-size:13px;width:90px;"
+                    placeholder="Lab name">
+                <button onclick="nextUI.newTopology()" class="secondary">New</button>
+                <button onclick="nextUI.openAddNodeModal()" class="success">+ Node</button>
+                <button onclick="nextUI.openExportYAML()" class="secondary">YAML</button>
+            </div>
+
+            <!-- Node Control -->
+            <div class="control-section">
+                <h4>Node Control</h4>
+                <button onclick="nextUI.runSelectedNodeCommand()" class="secondary">
+                    Command
+                </button>
+            </div>
+
+            <!-- Developer -->
+            <div class="control-section">
+                <h4>Developer</h4>
+                <button onclick="nextUI.toggleDebugOverlay()" class="secondary">
+                    Toggle Debug HitTest
+                </button>
+                <button onclick="window.open('/docs', '_blank')" class="secondary">
+                    API Docs
+                </button>
+                <button onclick="window.open('/health', '_blank')" class="secondary">
+                    Health
+                </button>
+            </div>
+        </div>
+
+        <!-- Topology Container -->
+        <div class="topology-container" id="topology"></div>
+
+        <div id="nodeContextMenu" class="node-context-menu">
+            <button id="ctxAddLinkBtn" onclick="nextUI.startAddLinkFromContextMenu()">Add Link</button>
+            <button id="ctxDeleteNodeBtn" onclick="nextUI.deleteNodeFromContextMenu()">Delete Node</button>
+            <button id="ctxConnectBtn" onclick="nextUI.connectFromContextMenu()">SSH Connect</button>
+        </div>
+
+        <!-- Footer -->
+        <div class="footer">
+            <p>
+                Right-click node to add link. ESC cancels linking. 
+                <a href="/docs">API Docs</a> |
+                <a href="/redoc">Ref</a>
+            </p>
+        </div>
+
+        <!-- Add Node Modal -->
+        <div id="addNodeModal" class="modal-overlay">
+            <div class="modal-box">
+                <h3>Add Node</h3>
+                <div class="form-row">
+                    <label>Node Name *</label>
+                    <input id="nodeName" type="text" placeholder="e.g. r-{$count}">
+                    <small style="margin-top:4px;color:#64748b;font-size:11px;">Pattern supports {$count} or $count. Example: r-{$count} with count 5 => r-1 ... r-5</small>
+                </div>
+                <div class="form-row">
+                    <label>Node Count</label>
+                    <input id="nodeCount" type="number" min="1" max="200" value="1">
+                </div>
+                <div class="form-row">
+                    <label>Kind</label>
+                    <select id="nodeKind" onchange="nextUI.onKindChange()">
+                        <option value="linux">linux</option>
+                        <option value="nokia_srlinux">nokia_srlinux (SR Linux)</option>
+                        <option value="vr-xrv">vr-xrv (Cisco XRv)</option>
+                        <option value="ceos">ceos (Arista cEOS)</option>
+                        <option value="bridge">bridge</option>
+                    </select>
+                </div>
+                <div class="form-row">
+                    <label>Image</label>
+                    <input id="nodeImage" type="text" placeholder="ubuntu:20.04">
+                </div>
+                <div class="form-row">
+                    <label>Icon</label>
+                    <select id="nodeIcon">
+                        <option value="host">host</option>
+                        <option value="router">router</option>
+                        <option value="switch">switch</option>
+                        <option value="server">server</option>
+                        <option value="cloud">cloud</option>
+                    </select>
+                </div>
+                <div class="modal-actions">
+                    <button class="secondary" onclick="nextUI.closeModal('addNodeModal')">Cancel</button>
+                    <button class="success" onclick="nextUI.addNodeFromForm()">Add Node(s)</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Export YAML Modal -->
+        <div id="yamlModal" class="modal-overlay">
+            <div class="modal-box">
+                <h3>Export containerlab YAML</h3>
+                <textarea id="yaml-output" readonly></textarea>
+                <div class="modal-actions">
+                    <button class="secondary" onclick="nextUI.closeModal('yamlModal')">Close</button>
+                    <button onclick="nextUI.copyYAML()">Copy to Clipboard</button>
+                    <button class="success" onclick="nextUI.downloadYAML()">Download</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Link Interface Selection Modal -->
+        <div id="linkIfModal" class="modal-overlay">
+            <div class="modal-box">
+                <h3>Select Link Interfaces</h3>
+                <div class="form-row">
+                    <label>Source Node</label>
+                    <input id="linkIfSourceNode" type="text" readonly>
+                </div>
+                <div class="form-row">
+                    <label>Source Interface</label>
+                    <select id="linkIfSourceSelect"></select>
+                </div>
+                <div class="form-row">
+                    <label>Target Node</label>
+                    <input id="linkIfTargetNode" type="text" readonly>
+                </div>
+                <div class="form-row">
+                    <label>Target Interface</label>
+                    <select id="linkIfTargetSelect"></select>
+                </div>
+                <div class="modal-actions">
+                    <button class="secondary" onclick="nextUI.cancelLinkInterfaceSelection()">Cancel</button>
+                    <button class="success" onclick="nextUI.confirmLinkInterfaceSelection()">Add Link</button>
+                </div>
+            </div>
+        </div>
+    </body>
+</html>
