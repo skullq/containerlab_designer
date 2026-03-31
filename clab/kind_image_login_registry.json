@@ -1,0 +1,10 @@
+{
+  "default_login_name": "clab",
+  "mappings": {
+    "cisco_xrd": {
+      "image": "ios-xr/xrd-control-plane:26.1.1",
+      "login_name": "clab"
+    }
+  },
+  "updated_at": "2026-03-31T15:12:03.882381Z"
+}

@@ -105,6 +105,9 @@
                 .lab-status-item {
                     flex: 1 1 260px;
                 }
+                #controls-server {
+                    grid-template-columns: 1fr;
+                }
             }
             .tab-strip {
                 display: flex;
@@ -147,6 +150,12 @@
             .controls.hidden {
                 display: none;
             }
+            #controls-server {
+                display: grid;
+                grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+                gap: 10px;
+                align-items: start;
+            }
             .control-section {
                 border: 1px solid #ddd;
                 padding: 8px;
@@ -163,6 +172,39 @@
                 text-transform: uppercase;
                 color: #64748b;
                 letter-spacing: 0.04em;
+            }
+            #controls-server .control-section {
+                width: auto !important;
+                padding: 10px;
+                border: 1px solid #dbe3ee;
+                border-radius: 8px;
+                box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+                gap: 8px;
+            }
+            #controls-server .control-section h4 {
+                width: 100%;
+                margin: 0 0 2px 0;
+            }
+            #controls-server .control-section.server-full {
+                grid-column: 1 / -1;
+            }
+            #controls-server .server-auth-input,
+            #controls-server .dev-input {
+                flex: 1 1 200px;
+                min-width: 180px;
+            }
+            #controls-server #server-auth-status,
+            #controls-server #kind-image-status {
+                width: 100%;
+                margin-left: 0;
+                margin-top: 2px;
+            }
+            #controls-server .mapping-table-wrap {
+                margin-top: 2px;
+                max-height: 220px;
+            }
+            .topology-container.hidden {
+                display: none;
             }
             /* Keep Topology controls in deterministic visual order even when wrapped */
             #controls-topology .control-topology-editor { order: 1; }
@@ -212,6 +254,100 @@
                 width: 100%;
                 color: #64748b;
                 font-size: 12px;
+            }
+            .deploy-access-panel {
+                position: absolute;
+                top: 12px;
+                right: 12px;
+                width: fit-content;
+                min-width: 320px;
+                max-width: min(680px, calc(100% - 24px));
+                max-height: calc(100% - 24px);
+                overflow: hidden;
+                background: rgba(255, 255, 255, 0.96);
+                border: 1px solid #dbe3ee;
+                border-radius: 10px;
+                box-shadow: 0 8px 22px rgba(15, 23, 42, 0.14);
+                backdrop-filter: blur(4px);
+                z-index: 1200;
+                display: none;
+                flex-direction: column;
+                user-select: none;
+            }
+            .deploy-access-panel.open {
+                display: flex;
+            }
+            .deploy-access-panel.minimized .deploy-access-status,
+            .deploy-access-panel.minimized .deploy-access-body {
+                display: none;
+            }
+            .deploy-access-panel.minimized {
+                max-height: none;
+            }
+            .deploy-access-head {
+                display: flex;
+                align-items: center;
+                gap: 8px;
+                padding: 10px 12px;
+                border-bottom: 1px solid #e6edf6;
+                background: #f8fafc;
+                cursor: move;
+                border-radius: 10px 10px 0 0;
+            }
+            .deploy-access-panel.minimized .deploy-access-head {
+                border-bottom: none;
+                border-radius: 10px;
+            }
+            .deploy-access-title {
+                font-size: 11px;
+                text-transform: uppercase;
+                letter-spacing: 0.06em;
+                color: #475569;
+                font-weight: 700;
+                margin-right: auto;
+                cursor: move;
+            }
+            .deploy-access-status {
+                font-size: 12px;
+                color: #64748b;
+                padding: 8px 12px;
+                border-bottom: 1px solid #e6edf6;
+            }
+            .deploy-access-body {
+                overflow: auto;
+                max-height: 44vh;
+            }
+            .deploy-access-table {
+                width: max-content;
+                min-width: 100%;
+                border-collapse: collapse;
+                font-size: 12px;
+            }
+            .deploy-access-table th,
+            .deploy-access-table td {
+                padding: 7px 10px;
+                border-bottom: 1px solid #eef2f7;
+                text-align: left;
+                vertical-align: middle;
+            }
+            .deploy-access-table th {
+                font-size: 11px;
+                text-transform: uppercase;
+                color: #64748b;
+                background: #fbfdff;
+            }
+            .deploy-access-link {
+                color: #1d4ed8;
+                text-decoration: none;
+                white-space: nowrap;
+                cursor: pointer;
+            }
+            .deploy-access-link:hover {
+                text-decoration: underline;
+            }
+            .deploy-access-error {
+                color: #b91c1c;
+                font-size: 11px;
             }
             #server-auth-status {
                 color: #64748b;
@@ -333,6 +469,7 @@
                 margin: 8px 10px 0;
                 border: 1px solid #ddd;
                 border-radius: 4px;
+                position: relative;
                 background:
                     linear-gradient(0deg, rgba(15, 23, 42, 0.02) 1px, transparent 1px),
                     linear-gradient(90deg, rgba(15, 23, 42, 0.02) 1px, transparent 1px),
@@ -341,6 +478,11 @@
                 min-height: 380px;
                 flex: 1 1 auto;
                 overflow: hidden;
+            }
+            #topology {
+                width: 100%;
+                height: 100%;
+                min-height: 380px;
             }
             .footer {
                 padding: 4px 10px 8px;
@@ -546,8 +688,7 @@
 
         <div class="tab-strip">
             <button id="tab-btn-topology" class="tab-btn active" onclick="nextUI.switchMainTab('topology')">Topology</button>
-            <button id="tab-btn-server" class="tab-btn" onclick="nextUI.switchMainTab('server')">Server Auth</button>
-            <button id="tab-btn-develop" class="tab-btn" onclick="nextUI.switchMainTab('develop')">Develop</button>
+            <button id="tab-btn-server" class="tab-btn" onclick="nextUI.switchMainTab('server')">Server Setting</button>
         </div>
 
         <div id="controls-topology" class="controls">
@@ -578,11 +719,14 @@
                 <button onclick="nextUI.runSelectedNodeCommand()" class="secondary">
                     Command
                 </button>
+                <button onclick="nextUI.toggleDebugOverlay()" class="secondary">
+                    Toggle Debug HitTest
+                </button>
             </div>
         </div>
 
         <div id="controls-server" class="controls hidden">
-            <div class="control-section" style="width:100%; justify-content:flex-start;">
+            <div class="control-section server-full" style="justify-content:flex-start;">
                 <h4>Remote Server Login</h4>
                 <input id="remote-server-url" class="server-auth-input" type="text" value="http://10.70.136.126:8080" placeholder="Server URL">
                 <input id="remote-username" class="server-auth-input" type="text" value="" placeholder="Username">
@@ -592,26 +736,12 @@
                 <button class="secondary" onclick="nextUI.refreshRemoteMetricsNow()">Refresh Now</button>
                 <span id="server-auth-status">Enter server credentials and connect.</span>
             </div>
-        </div>
 
-        <div id="controls-develop" class="controls hidden">
-            <div class="control-section" style="width:100%; justify-content:flex-start;">
-                <h4>Developer</h4>
-                <button onclick="nextUI.toggleDebugOverlay()" class="secondary">
-                    Toggle Debug HitTest
-                </button>
-                <button onclick="window.open('/api_tester.html', '_blank')" class="secondary">
-                    API Tester
-                </button>
-                <button onclick="window.open('/docs', '_blank')" class="secondary">
-                    API Docs
-                </button>
-            </div>
-
-            <div class="control-section" style="width:100%; align-items:flex-start;">
+            <div class="control-section server-full" style="align-items:flex-start;">
                 <h4>Kind → Image Registry</h4>
                 <select id="registry-kind-select" class="dev-input"></select>
                 <input id="registry-image-input" class="dev-input" type="text" placeholder="e.g. ghcr.io/nokia/srlinux:24.10.1">
+                <input id="registry-login-input" class="dev-input" type="text" placeholder="Initial login_name (e.g. admin)">
                 <button class="success" onclick="nextUI.saveKindImageMapping()">Save/Update</button>
                 <button class="secondary" onclick="nextUI.removeKindImageMapping()">Remove</button>
                 <div id="kind-image-status">Register image names from docker images output for each kind.</div>
@@ -621,18 +751,52 @@
                             <tr>
                                 <th>Kind</th>
                                 <th>Image</th>
+                                <th>Login Name</th>
                             </tr>
                         </thead>
                         <tbody id="kind-image-mapping-body">
-                            <tr><td colspan="2">No mappings registered.</td></tr>
+                            <tr><td colspan="3">No mappings registered.</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+            <div class="control-section server-full" style="justify-content:flex-start;">
+                <h4>Developer Tools</h4>
+                <button onclick="window.open('/api_tester.html', '_blank')" class="secondary">
+                    API Tester
+                </button>
+                <button onclick="window.open('/docs', '_blank')" class="secondary">
+                    API Docs
+                </button>
+            </div>
+        </div>
+
+        <!-- Topology Container -->
+        <div class="topology-container" id="topologyContainer">
+            <div id="topology"></div>
+
+            <div id="deployAccessPanel" class="deploy-access-panel">
+                <div class="deploy-access-head" id="deployAccessPanelHead">
+                    <span class="deploy-access-title">Instance Access Info</span>
+                    <button class="secondary" onclick="nextUI.refreshDeploymentAccessPanel()">Refresh</button>
+                    <button class="secondary" id="deployAccessMinimizeBtn" onclick="nextUI.toggleDeploymentAccessPanel()">&#8211;</button>
+                </div>
+                <div id="deploy-access-status" class="deploy-access-status">Deploy a lab to load SSH links.</div>
+                <div class="deploy-access-body">
+                    <table class="deploy-access-table">
+                        <thead>
+                            <tr>
+                                <th>Hostname</th>
+                                <th>SSH URI</th>
+                            </tr>
+                        </thead>
+                        <tbody id="deploy-access-body">
+                            <tr><td colspan="2">No deployed instances.</td></tr>
                         </tbody>
                     </table>
                 </div>
             </div>
         </div>
-
-        <!-- Topology Container -->
-        <div class="topology-container" id="topology"></div>
 
         <div id="nodeContextMenu" class="node-context-menu">
             <button id="ctxAddLinkBtn" onclick="nextUI.startAddLinkFromContextMenu()">Add Link</button>
@@ -665,7 +829,7 @@
                 <div class="form-row">
                     <label>Kind</label>
                     <select id="nodeKind" onchange="nextUI.onKindChange()"></select>
-                    <small style="margin-top:4px;color:#64748b;font-size:11px;">Only kinds registered in Develop &gt; Kind → Image Registry are available.</small>
+                    <small style="margin-top:4px;color:#64748b;font-size:11px;">Only kinds registered in Server Setting &gt; Kind → Image Registry are available.</small>
                 </div>
                 <div class="form-row">
                     <label>Image</label>

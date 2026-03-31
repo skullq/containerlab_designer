@@ -42,6 +42,8 @@ app.add_middleware(
 ROOT_DIR = Path(__file__).parent.parent
 LAYOUT_STORE_FILE = ROOT_DIR / "clab" / "node_layouts.json"
 _layout_lock = threading.Lock()
+KIND_IMAGE_LOGIN_STORE_FILE = ROOT_DIR / "clab" / "kind_image_login_registry.json"
+_kind_image_login_lock = threading.Lock()
 
 
 def _read_layout_store() -> Dict[str, Any]:
@@ -88,6 +90,152 @@ def _delete_layout_positions(lab_id: str) -> bool:
         del store[lab_id]
         _write_layout_store(store)
         return True
+
+
+def _sanitize_login_name(value: Any) -> str:
+    login_name = str(value or "").strip()
+    if not login_name:
+        return ""
+    if any(ch.isspace() for ch in login_name):
+        raise HTTPException(status_code=400, detail="login_name must not contain whitespace")
+    return login_name
+
+
+def _read_kind_image_login_store() -> Dict[str, Any]:
+    if not KIND_IMAGE_LOGIN_STORE_FILE.exists():
+        return {
+            "default_login_name": "admin",
+            "mappings": {},
+        }
+    try:
+        with KIND_IMAGE_LOGIN_STORE_FILE.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return {
+            "default_login_name": "admin",
+            "mappings": {},
+        }
+
+    default_login_name = _sanitize_login_name(data.get("default_login_name") or "admin") or "admin"
+    mappings_raw = data.get("mappings") if isinstance(data, dict) else {}
+    mappings: Dict[str, Dict[str, str]] = {}
+
+    if isinstance(mappings_raw, dict):
+        for kind, item in mappings_raw.items():
+            kind_key = str(kind or "").strip()
+            if not kind_key or not isinstance(item, dict):
+                continue
+            image = str(item.get("image") or "").strip()
+            login_name = _sanitize_login_name(item.get("login_name") or "")
+            if not image:
+                continue
+            mappings[kind_key] = {
+                "image": image,
+                "login_name": login_name or default_login_name,
+            }
+
+    return {
+        "default_login_name": default_login_name,
+        "mappings": mappings,
+    }
+
+
+def _write_kind_image_login_store(data: Dict[str, Any]) -> None:
+    KIND_IMAGE_LOGIN_STORE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with KIND_IMAGE_LOGIN_STORE_FILE.open("w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=True, indent=2)
+
+
+def _get_kind_image_login_settings() -> Dict[str, Any]:
+    with _kind_image_login_lock:
+        data = _read_kind_image_login_store()
+        return {
+            "default_login_name": data.get("default_login_name") or "admin",
+            "mappings": data.get("mappings") if isinstance(data.get("mappings"), dict) else {},
+        }
+
+
+def _set_kind_image_login_mapping(kind: str, image: str, login_name: str) -> Dict[str, Any]:
+    kind_key = str(kind or "").strip()
+    image_value = str(image or "").strip()
+    login_value = _sanitize_login_name(login_name)
+
+    if not kind_key:
+        raise HTTPException(status_code=400, detail="kind is required")
+    if not image_value:
+        raise HTTPException(status_code=400, detail="image is required")
+    if not login_value:
+        raise HTTPException(status_code=400, detail="login_name is required")
+
+    with _kind_image_login_lock:
+        store = _read_kind_image_login_store()
+        mappings = store.get("mappings") if isinstance(store.get("mappings"), dict) else {}
+        mappings[kind_key] = {
+            "image": image_value,
+            "login_name": login_value,
+        }
+        payload = {
+            "default_login_name": store.get("default_login_name") or "admin",
+            "mappings": mappings,
+            "updated_at": datetime.utcnow().isoformat() + "Z",
+        }
+        _write_kind_image_login_store(payload)
+
+    return {
+        "default_login_name": payload["default_login_name"],
+        "mappings": payload["mappings"],
+    }
+
+
+def _set_default_login_name(login_name: str) -> Dict[str, Any]:
+    login_value = _sanitize_login_name(login_name)
+    if not login_value:
+        raise HTTPException(status_code=400, detail="default login_name is required")
+
+    with _kind_image_login_lock:
+        store = _read_kind_image_login_store()
+        mappings = store.get("mappings") if isinstance(store.get("mappings"), dict) else {}
+        for kind, item in mappings.items():
+            if not isinstance(item, dict):
+                continue
+            current_login = _sanitize_login_name(item.get("login_name") or "")
+            if not current_login:
+                item["login_name"] = login_value
+
+        payload = {
+            "default_login_name": login_value,
+            "mappings": mappings,
+            "updated_at": datetime.utcnow().isoformat() + "Z",
+        }
+        _write_kind_image_login_store(payload)
+
+    return {
+        "default_login_name": payload["default_login_name"],
+        "mappings": payload["mappings"],
+    }
+
+
+def _delete_kind_image_login_mapping(kind: str) -> Dict[str, Any]:
+    kind_key = str(kind or "").strip()
+    if not kind_key:
+        raise HTTPException(status_code=400, detail="kind is required")
+
+    with _kind_image_login_lock:
+        store = _read_kind_image_login_store()
+        mappings = store.get("mappings") if isinstance(store.get("mappings"), dict) else {}
+        removed = bool(mappings.pop(kind_key, None))
+        payload = {
+            "default_login_name": store.get("default_login_name") or "admin",
+            "mappings": mappings,
+            "updated_at": datetime.utcnow().isoformat() + "Z",
+        }
+        _write_kind_image_login_store(payload)
+
+    return {
+        "removed": removed,
+        "default_login_name": payload["default_login_name"],
+        "mappings": payload["mappings"],
+    }
 
 
 def get_api_client(request: Request) -> ClabAPIClient:
@@ -181,6 +329,34 @@ async def tester_request(payload: Dict[str, Any]):
         }
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Request proxy failed: {e}")
+
+
+@app.get("/api/settings/kind-image-login")
+async def get_kind_image_login_settings():
+    """Return kind/image/login_name mappings persisted on the server."""
+    return _get_kind_image_login_settings()
+
+
+@app.put("/api/settings/kind-image-login")
+async def set_kind_image_login_settings(payload: Dict[str, Any]):
+    """Upsert a kind/image/login_name mapping persisted on the server."""
+    kind = payload.get("kind")
+    image = payload.get("image")
+    login_name = payload.get("login_name")
+    return _set_kind_image_login_mapping(kind=kind, image=image, login_name=login_name)
+
+
+@app.put("/api/settings/default-login-name")
+async def set_default_login_name(payload: Dict[str, Any]):
+    """Update the default login_name used for new mappings and SSH URI fallback."""
+    login_name = payload.get("login_name")
+    return _set_default_login_name(login_name=login_name)
+
+
+@app.delete("/api/settings/kind-image-login/{kind}")
+async def delete_kind_image_login_settings(kind: str):
+    """Delete a kind mapping persisted on the server."""
+    return _delete_kind_image_login_mapping(kind)
 
 
 # ============================================================================

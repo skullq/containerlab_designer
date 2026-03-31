@@ -47,20 +47,25 @@
     const mgmtIpByNode = new Map();
     const MGMT_IP_PREFIX = '172.31.255';
     const LAYOUT_STORAGE_PREFIX = 'next_ui.layout.';
-    const KIND_IMAGE_REGISTRY_KEY = 'next_ui.kind_image_registry';
     const TOPOLOGY_SNAPSHOT_KEY = 'next_ui.topology_snapshot.v1';
     const DEBUG_SHOW_NODE_COORD_LABEL = true;
     let mgmtHostCounter = 10;
     let topologyApp = null;
     let remoteServerUrl = '';
     let remoteAuthToken = '';
+    let remotePasswordCache = '';
     let remoteMetricsTimer = null;
     let labStatusTimer = null;
+    let tokenRefreshTimer = null;
+    let tokenRefreshInFlight = null;
     let lastRemoteCpuPercent = NaN;
     let lastRemoteMemPercent = NaN;
     let lastRemoteApiConnected = false;
     let lastRemoteApiLabel = 'Disconnected';
+    let activeMainTab = 'topology';
+    let deploymentAccessPanelRequested = false;
     let kindImageRegistry = {};
+    let defaultLoginName = 'admin';
     const LINK_PREVIEW_LAYER_ID = 'nextui-link-preview-layer';
     const LINK_PREVIEW_LINE_ID = 'nextui-link-preview-line';
     const INTERACTION = {
@@ -72,7 +77,7 @@
         dedupeMs: 120,
         suppressClickNodeMs: 200,  // Increased from 140ms for slower systems
         backgroundDragStartPx: 7,
-        nodeDragHideTooltipPx: 12,
+        nodeDragHideTooltipPx: 2,
         menuMargin: 8,
     };
 
@@ -326,6 +331,90 @@
         return nowEpoch >= exp;
     }
 
+    function getTokenExpiresInSeconds(token) {
+        const exp = parseJwtExpiryEpoch(token);
+        if (!exp) return null;
+        const nowEpoch = Math.floor(Date.now() / 1000);
+        return exp - nowEpoch;
+    }
+
+    function stopTokenRefreshScheduler() {
+        if (tokenRefreshTimer) {
+            clearTimeout(tokenRefreshTimer);
+            tokenRefreshTimer = null;
+        }
+    }
+
+    async function loginRemoteServerAndGetToken(serverUrl, username, password) {
+        const response = await fetch('/api/tester/login', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                serverUrl,
+                username,
+                password,
+            }),
+        });
+        const data = await response.json();
+        if (!response.ok) {
+            const detail = data && data.detail ? data.detail : 'Login failed';
+            throw new Error(typeof detail === 'string' ? detail : JSON.stringify(detail));
+        }
+        if (!data.token) {
+            throw new Error('Login succeeded but token is missing.');
+        }
+        return String(data.token);
+    }
+
+    function scheduleTokenAutoRefresh() {
+        stopTokenRefreshScheduler();
+        if (!remoteServerUrl || !remoteAuthToken) return;
+
+        const expiresInSec = getTokenExpiresInSeconds(remoteAuthToken);
+        if (!Number.isFinite(expiresInSec)) return;
+
+        // Refresh 60s before expiry; if already near expiry, refresh almost immediately.
+        const refreshInSec = Math.max(5, Number(expiresInSec) - 60);
+        tokenRefreshTimer = setTimeout(function() {
+            refreshRemoteTokenSilently('scheduled');
+        }, refreshInSec * 1000);
+    }
+
+    async function refreshRemoteTokenSilently(reason) {
+        if (tokenRefreshInFlight) return tokenRefreshInFlight;
+
+        const urlEl = document.getElementById('remote-server-url');
+        const userEl = document.getElementById('remote-username');
+        const serverUrl = String((urlEl && urlEl.value) || localStorage.getItem('next_ui.remote_server_url') || remoteServerUrl || '').trim();
+        const username = String((userEl && userEl.value) || localStorage.getItem('next_ui.remote_username') || '').trim();
+        const password = String(remotePasswordCache || sessionStorage.getItem('next_ui.remote_password') || '');
+
+        tokenRefreshInFlight = (async function() {
+            try {
+                if (!serverUrl || !username || !password) {
+                    throw new Error('Cannot auto-refresh token: cached credentials are missing. Reconnect once to enable auto-refresh.');
+                }
+
+                const newToken = await loginRemoteServerAndGetToken(serverUrl, username, password);
+                remoteServerUrl = serverUrl;
+                remoteAuthToken = newToken;
+                localStorage.setItem('next_ui.remote_server_url', remoteServerUrl);
+                localStorage.setItem('next_ui.remote_username', username);
+                localStorage.setItem('next_ui.remote_token', remoteAuthToken);
+                scheduleTokenAutoRefresh();
+                return true;
+            } catch (e) {
+                console.warn('Token auto-refresh failed (' + String(reason || 'n/a') + '):', e);
+                setServerAuthStatus(`Token auto-refresh failed: ${e.message || e}`, true);
+                return false;
+            } finally {
+                tokenRefreshInFlight = null;
+            }
+        })();
+
+        return tokenRefreshInFlight;
+    }
+
     function summarizeRemoteErrorData(data) {
         if (data == null) return '';
         if (typeof data === 'string') return data;
@@ -363,9 +452,12 @@
         }
 
         if (isTokenExpired(remoteAuthToken)) {
-            disconnectRemoteServer();
-            setServerAuthStatus('Saved token expired. Please reconnect with username/password.', true);
-            return;
+            const refreshed = await refreshRemoteTokenSilently('expired-check');
+            if (!refreshed && isTokenExpired(remoteAuthToken)) {
+                disconnectRemoteServer();
+                setServerAuthStatus('Saved token expired. Please reconnect with username/password.', true);
+                return;
+            }
         }
 
         try {
@@ -412,11 +504,14 @@
         }
     }
 
-    function startLabStatusPolling() {
+    function startLabStatusPolling(onFirstComplete) {
         if (labStatusTimer) {
             clearInterval(labStatusTimer);
         }
-        refreshLabStatusNow();
+        const firstPoll = refreshLabStatusNow();
+        if (typeof onFirstComplete === 'function') {
+            firstPoll.then(onFirstComplete).catch(function() {});
+        }
         labStatusTimer = setInterval(refreshLabStatusNow, 5000);
     }
 
@@ -444,34 +539,21 @@
         setServerAuthStatus('Connecting to remote server...', false);
 
         try {
-            const response = await fetch('/api/tester/login', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    serverUrl,
-                    username,
-                    password,
-                }),
-            });
-            const data = await response.json();
-            if (!response.ok) {
-                const detail = data && data.detail ? data.detail : 'Login failed';
-                throw new Error(typeof detail === 'string' ? detail : JSON.stringify(detail));
-            }
-            if (!data.token) {
-                throw new Error('Login succeeded but token is missing.');
-            }
+            const token = await loginRemoteServerAndGetToken(serverUrl, username, password);
 
             remoteServerUrl = serverUrl;
-            remoteAuthToken = data.token;
+            remoteAuthToken = token;
+            remotePasswordCache = password;
             localStorage.setItem('next_ui.remote_server_url', remoteServerUrl);
             localStorage.setItem('next_ui.remote_username', username);
             localStorage.setItem('next_ui.remote_token', remoteAuthToken);
+            sessionStorage.setItem('next_ui.remote_password', remotePasswordCache);
             if (passEl) passEl.value = '';
 
             setRemoteApiIndicator(true, 'Connected');
             startRemoteMetricsPolling();
             startLabStatusPolling();
+            scheduleTokenAutoRefresh();
         } catch (e) {
             remoteAuthToken = '';
             setRemoteApiIndicator(false, 'Disconnected');
@@ -482,9 +564,12 @@
 
     function disconnectRemoteServer() {
         remoteAuthToken = '';
+        remotePasswordCache = '';
         stopRemoteMetricsPolling();
         stopLabStatusPolling();
+        stopTokenRefreshScheduler();
         localStorage.removeItem('next_ui.remote_token');
+        sessionStorage.removeItem('next_ui.remote_password');
         setRemoteApiIndicator(false, 'Disconnected');
         setRemoteMetrics(NaN, NaN);
         setLabRuntimeIndicator('idle', 'Connect to a remote server');
@@ -492,30 +577,31 @@
     }
 
     function switchMainTab(tabName) {
+        activeMainTab = tabName === 'server' ? 'server' : 'topology';
         const topologyPanel = document.getElementById('controls-topology');
         const serverPanel = document.getElementById('controls-server');
-        const developPanel = document.getElementById('controls-develop');
+        const topologyContainer = document.getElementById('topologyContainer');
         const topologyBtn = document.getElementById('tab-btn-topology');
         const serverBtn = document.getElementById('tab-btn-server');
-        const developBtn = document.getElementById('tab-btn-develop');
 
         const showTopology = tabName === 'topology';
         const showServer = tabName === 'server';
-        const showDevelop = tabName === 'develop';
 
         if (topologyPanel) topologyPanel.classList.toggle('hidden', !showTopology);
         if (serverPanel) serverPanel.classList.toggle('hidden', !showServer);
-        if (developPanel) developPanel.classList.toggle('hidden', !showDevelop);
+        if (topologyContainer) topologyContainer.classList.toggle('hidden', showServer);
+        if (showServer) setDeploymentAccessPanelVisible(false);
+        if (showTopology && deploymentAccessPanelRequested) setDeploymentAccessPanelVisible(true);
 
         if (topologyBtn) topologyBtn.classList.toggle('active', showTopology);
         if (serverBtn) serverBtn.classList.toggle('active', showServer);
-        if (developBtn) developBtn.classList.toggle('active', showDevelop);
     }
 
     function restoreRemoteServerForm() {
         const savedUrl = localStorage.getItem('next_ui.remote_server_url') || '';
         const savedUser = localStorage.getItem('next_ui.remote_username') || '';
         const savedToken = localStorage.getItem('next_ui.remote_token') || '';
+        const savedPassword = sessionStorage.getItem('next_ui.remote_password') || '';
 
         const urlEl = document.getElementById('remote-server-url');
         const userEl = document.getElementById('remote-username');
@@ -524,6 +610,7 @@
 
         remoteServerUrl = savedUrl;
         remoteAuthToken = savedToken;
+        remotePasswordCache = savedPassword;
 
         if (remoteAuthToken && isTokenExpired(remoteAuthToken)) {
             remoteAuthToken = '';
@@ -534,7 +621,10 @@
         if (remoteServerUrl && remoteAuthToken) {
             setRemoteApiIndicator(true, 'Connected');
             startRemoteMetricsPolling();
-            startLabStatusPolling();
+            startLabStatusPolling(function() {
+                if (currentLabId) refreshDeploymentAccessPanel(currentLabId);
+            });
+            scheduleTokenAutoRefresh();
         } else {
             setRemoteApiIndicator(false, 'Disconnected');
             setRemoteMetrics(NaN, NaN);
@@ -666,14 +756,30 @@
     function getMappedImageForKind(kind) {
         const k = String(kind || '').trim();
         if (!k) return '';
-        if (kindImageRegistry[k]) return kindImageRegistry[k];
+        const mapped = kindImageRegistry[k];
+        if (mapped && typeof mapped === 'object' && mapped.image) return String(mapped.image || '').trim();
         return (KIND_DEFAULTS[k] && KIND_DEFAULTS[k].image) ? KIND_DEFAULTS[k].image : '';
+    }
+
+    function getMappedLoginNameForKind(kind) {
+        const k = String(kind || '').trim();
+        if (!k) return String(defaultLoginName || 'admin').trim();
+        const mapped = kindImageRegistry[k];
+        if (mapped && typeof mapped === 'object' && mapped.login_name) {
+            return String(mapped.login_name || '').trim();
+        }
+        return String(defaultLoginName || 'admin').trim();
     }
 
     function getRegisteredKindEntries() {
         return Object.keys(kindImageRegistry)
             .map(function(kind) {
-                return { kind, image: String(kindImageRegistry[kind] || '').trim() };
+                const mapping = kindImageRegistry[kind] || {};
+                return {
+                    kind,
+                    image: String(mapping.image || '').trim(),
+                    login_name: String(mapping.login_name || defaultLoginName || '').trim(),
+                };
             })
             .filter(function(item) {
                 return !!item.kind && !!item.image;
@@ -686,7 +792,8 @@
     function getRegisteredImageForKind(kind) {
         const k = String(kind || '').trim();
         if (!k) return '';
-        return String(kindImageRegistry[k] || '').trim();
+        const mapping = kindImageRegistry[k] || {};
+        return String(mapping.image || '').trim();
     }
 
     function refreshAddNodeKindOptions(preferredKind) {
@@ -720,18 +827,40 @@
         el.style.color = isError ? '#b91c1c' : '#64748b';
     }
 
-    function loadKindImageRegistry() {
+    async function loadKindImageRegistryFromServer() {
         try {
-            const raw = localStorage.getItem(KIND_IMAGE_REGISTRY_KEY);
-            const parsed = raw ? JSON.parse(raw) : {};
-            kindImageRegistry = parsed && typeof parsed === 'object' ? parsed : {};
-        } catch (e) {
-            kindImageRegistry = {};
-        }
-    }
+            const response = await fetch('/api/settings/kind-image-login');
+            const payload = await response.json();
+            if (!response.ok) {
+                throw new Error(payload && payload.detail ? payload.detail : `HTTP ${response.status}`);
+            }
 
-    function saveKindImageRegistry() {
-        localStorage.setItem(KIND_IMAGE_REGISTRY_KEY, JSON.stringify(kindImageRegistry));
+            const mappings = payload && typeof payload.mappings === 'object' ? payload.mappings : {};
+            kindImageRegistry = {};
+            Object.keys(mappings).forEach(function(kind) {
+                const item = mappings[kind];
+                if (!item || typeof item !== 'object') return;
+                const image = String(item.image || '').trim();
+                const loginName = String(item.login_name || '').trim();
+                if (!image) return;
+                kindImageRegistry[String(kind)] = {
+                    image: image,
+                    login_name: loginName || String(payload.default_login_name || 'admin').trim() || 'admin',
+                };
+            });
+
+            defaultLoginName = String(payload.default_login_name || 'admin').trim() || 'admin';
+            const defaultLoginEl = document.getElementById('registry-login-input');
+            if (defaultLoginEl && !String(defaultLoginEl.value || '').trim()) {
+                defaultLoginEl.value = defaultLoginName;
+            }
+            return true;
+        } catch (error) {
+            setKindImageStatus(`Failed to load server registry: ${error.message || error}`, true);
+            kindImageRegistry = {};
+            defaultLoginName = 'admin';
+            return false;
+        }
     }
 
     function renderKindImageRegistry() {
@@ -740,18 +869,20 @@
 
         const keys = Object.keys(kindImageRegistry).sort();
         if (keys.length === 0) {
-            body.innerHTML = '<tr><td colspan="2">No mappings registered.</td></tr>';
+            body.innerHTML = '<tr><td colspan="3">No mappings registered.</td></tr>';
             return;
         }
 
         body.innerHTML = keys.map(function(kind) {
-            const image = kindImageRegistry[kind] || '';
-            return `<tr><td>${kind}</td><td>${image}</td></tr>`;
+            const item = kindImageRegistry[kind] || {};
+            const image = String(item.image || '').trim();
+            const loginName = String(item.login_name || defaultLoginName || 'admin').trim() || 'admin';
+            return `<tr><td>${kind}</td><td>${image}</td><td>${loginName}</td></tr>`;
         }).join('');
     }
 
-    function initKindImageRegistryUI() {
-        loadKindImageRegistry();
+    async function initKindImageRegistryUI() {
+        await loadKindImageRegistryFromServer();
 
         const selectEl = document.getElementById('registry-kind-select');
         if (selectEl) {
@@ -763,26 +894,34 @@
             if (options.includes('linux')) selectEl.value = 'linux';
             selectEl.addEventListener('change', function() {
                 const imageEl = document.getElementById('registry-image-input');
+                const loginEl = document.getElementById('registry-login-input');
                 if (imageEl) imageEl.value = getMappedImageForKind(selectEl.value);
+                if (loginEl) loginEl.value = getMappedLoginNameForKind(selectEl.value);
             });
         }
 
         const imageEl = document.getElementById('registry-image-input');
+        const loginEl = document.getElementById('registry-login-input');
         if (imageEl && selectEl) {
             imageEl.value = getMappedImageForKind(selectEl.value);
+        }
+        if (loginEl && selectEl) {
+            loginEl.value = getMappedLoginNameForKind(selectEl.value);
         }
 
         renderKindImageRegistry();
         refreshAddNodeKindOptions('linux');
     }
 
-    function saveKindImageMapping() {
+    async function saveKindImageMapping() {
         const selectEl = document.getElementById('registry-kind-select');
         const imageEl = document.getElementById('registry-image-input');
-        if (!selectEl || !imageEl) return;
+        const loginEl = document.getElementById('registry-login-input');
+        if (!selectEl || !imageEl || !loginEl) return;
 
         const kind = String(selectEl.value || '').trim();
         const image = String(imageEl.value || '').trim();
+        const loginName = String(loginEl.value || '').trim();
         if (!kind) {
             setKindImageStatus('Kind is required.', true);
             return;
@@ -791,15 +930,46 @@
             setKindImageStatus('Image is required.', true);
             return;
         }
+        if (!loginName) {
+            setKindImageStatus('Initial login_name is required.', true);
+            return;
+        }
 
-        kindImageRegistry[kind] = image;
-        saveKindImageRegistry();
-        renderKindImageRegistry();
-        refreshAddNodeKindOptions(kind);
-        setKindImageStatus(`Saved mapping: ${kind} -> ${image}`, false);
+        try {
+            const defaultResp = await fetch('/api/settings/default-login-name', {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ login_name: loginName }),
+            });
+            const defaultData = await defaultResp.json();
+            if (!defaultResp.ok) {
+                throw new Error(defaultData && defaultData.detail ? defaultData.detail : `HTTP ${defaultResp.status}`);
+            }
+            defaultLoginName = String(defaultData.default_login_name || loginName).trim() || loginName;
+
+            const response = await fetch('/api/settings/kind-image-login', {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ kind, image, login_name: loginName }),
+            });
+            const payload = await response.json();
+            if (!response.ok) {
+                throw new Error(payload && payload.detail ? payload.detail : `HTTP ${response.status}`);
+            }
+
+            kindImageRegistry[kind] = {
+                image,
+                login_name: loginName,
+            };
+            renderKindImageRegistry();
+            refreshAddNodeKindOptions(kind);
+            setKindImageStatus(`Saved mapping: ${kind} -> ${image} (${loginName})`, false);
+        } catch (error) {
+            setKindImageStatus(`Save failed: ${error.message || error}`, true);
+        }
     }
 
-    function removeKindImageMapping() {
+    async function removeKindImageMapping() {
         const selectEl = document.getElementById('registry-kind-select');
         if (!selectEl) return;
         const kind = String(selectEl.value || '').trim();
@@ -810,13 +980,27 @@
             return;
         }
 
-        delete kindImageRegistry[kind];
-        saveKindImageRegistry();
-        renderKindImageRegistry();
-        refreshAddNodeKindOptions();
-        const imageEl = document.getElementById('registry-image-input');
-        if (imageEl) imageEl.value = getMappedImageForKind(kind);
-        setKindImageStatus(`Removed mapping for ${kind}.`, false);
+        try {
+            const response = await fetch(`/api/settings/kind-image-login/${encodeURIComponent(kind)}`, {
+                method: 'DELETE',
+            });
+            const payload = await response.json();
+            if (!response.ok) {
+                throw new Error(payload && payload.detail ? payload.detail : `HTTP ${response.status}`);
+            }
+
+            delete kindImageRegistry[kind];
+            defaultLoginName = String(payload.default_login_name || defaultLoginName || 'admin').trim() || 'admin';
+            renderKindImageRegistry();
+            refreshAddNodeKindOptions();
+            const imageEl = document.getElementById('registry-image-input');
+            const loginEl = document.getElementById('registry-login-input');
+            if (imageEl) imageEl.value = getMappedImageForKind(kind);
+            if (loginEl) loginEl.value = getMappedLoginNameForKind(kind);
+            setKindImageStatus(`Removed mapping for ${kind}.`, false);
+        } catch (error) {
+            setKindImageStatus(`Remove failed: ${error.message || error}`, true);
+        }
     }
 
     function isValidIpv4(ip) {
@@ -2223,9 +2407,10 @@
                 // One-shot delete: return to view mode after deletion.
                 setEditorMode('view');
                 queueSaveNodePositions(60);
-            } else if (!suppressNodeDetails) {
-                lastNodeClickRecord = { nodeId: node.id(), ts: now };
-                openNodeStatusWindowOnce(node, now);
+            } else if (editorMode === 'view') {
+                // In view mode, tooltip opening is handled on document mouseup only.
+                // This prevents overly frequent tooltip popups from NeXt clickNode events.
+                return;
             }
         });
 
@@ -2237,6 +2422,17 @@
 
         // Hook into NeXt's native drag events to close tooltip during drag
         topo.on('dragNode', function(topologyRef, node) {
+            if (pendingNodeDrag && node && typeof node.id === 'function' && node.id() === pendingNodeDrag.nodeId) {
+                const currentPos = getStableNodeModelPosition(node);
+                const dx = Number(currentPos.x) - Number(pendingNodeDrag.startNodeX || 0);
+                const dy = Number(currentPos.y) - Number(pendingNodeDrag.startNodeY || 0);
+                const movedSq = dx * dx + dy * dy;
+                const thresholdSq = INTERACTION.nodeDragHideTooltipPx * INTERACTION.nodeDragHideTooltipPx;
+                if (movedSq >= thresholdSq) {
+                    pendingNodeDrag.moved = true;
+                    pendingNodeDrag.tooltipHidden = true;
+                }
+            }
             if (topo && typeof topo.tooltipManager === 'function') {
                 try {
                     topo.tooltipManager().closeAll();
@@ -2246,14 +2442,17 @@
             }
         });
 
-        // Re-open tooltip after drag completes
+        // Do not auto-open tooltip on drag end; mouseup logic decides click vs drag.
         topo.on('dragNodeEnd', function(topologyRef, node) {
-            if (isTooltipBlocked()) return;
-            if (node && topo && typeof topo.tooltipManager === 'function') {
-                try {
-                    topo.tooltipManager().openNodeTooltip(node);
-                } catch (e) {
-                    // Ignore errors
+            if (pendingNodeDrag && node && typeof node.id === 'function' && node.id() === pendingNodeDrag.nodeId) {
+                const currentPos = getStableNodeModelPosition(node);
+                const dx = Number(currentPos.x) - Number(pendingNodeDrag.startNodeX || 0);
+                const dy = Number(currentPos.y) - Number(pendingNodeDrag.startNodeY || 0);
+                const movedSq = dx * dx + dy * dy;
+                const thresholdSq = INTERACTION.nodeDragHideTooltipPx * INTERACTION.nodeDragHideTooltipPx;
+                if (movedSq >= thresholdSq) {
+                    pendingNodeDrag.moved = true;
+                    pendingNodeDrag.tooltipHidden = true;
                 }
             }
         });
@@ -2529,24 +2728,19 @@
                 setBackgroundMoveCursor(false);
                 const node = topo && typeof topo.getNode === 'function' ? topo.getNode(resolvedNodeId) : null;
                 if (node) {
-                    handleNodePrimaryClick(node, now);
+                    const startNodePos = getStableNodeModelPosition(node);
                     pendingNodeDrag = {
                         nodeId: resolvedNodeId,
                         startClientX: evt.clientX,
                         startClientY: evt.clientY,
                         startTs: now,
+                        startNodeX: Number(startNodePos.x) || 0,
+                        startNodeY: Number(startNodePos.y) || 0,
+                        moved: false,
                         tooltipHidden: false,
                     };
-                    const isDoubleByDown = (
-                        lastNodePrimaryDown.nodeId === resolvedNodeId &&
-                        (now - lastNodePrimaryDown.ts) <= INTERACTION.doubleClickMs
-                    );
-                    if (isDoubleByDown) {
-                        openNodeStatusWindowOnce(node, now);
-                    }
                     lastNodePrimaryDown = { nodeId: resolvedNodeId, ts: now };
                     lastNodeClickTs = now;
-                    lastImmediateFocusTs = now;
                 }
             } else {
                 // If a node is focused, background click should clear focus, not start pan mode.
@@ -2597,9 +2791,11 @@
             const dxNode = evt.clientX - pendingNodeDrag.startClientX;
             const dyNode = evt.clientY - pendingNodeDrag.startClientY;
             const distanceSq = dxNode * dxNode + dyNode * dyNode;
+            const thresholdSq = INTERACTION.nodeDragHideTooltipPx * INTERACTION.nodeDragHideTooltipPx;
             
-            // Check if drag threshold crossed (5px)
-            if (distanceSq >= 25 && !pendingNodeDrag.tooltipHidden) {
+            // Only treat movement as drag after a meaningful pointer delta.
+            if (distanceSq >= thresholdSq && !pendingNodeDrag.tooltipHidden) {
+                pendingNodeDrag.moved = true;
                 if (topo && typeof topo.tooltipManager === 'function') {
                     try {
                         topo.tooltipManager().closeAll();
@@ -2703,12 +2899,23 @@
 
     function handleDocumentPointerUp(evt) {
         if (evt.button !== 0) return;
-        
-        // Note: dragNodeEnd event from NeXt will handle tooltip reopening
-        // so we don't need to do it here
+        const finishedNodeDrag = pendingNodeDrag;
         
         pendingNodeDrag = null;
         setBackgroundMoveCursor(false);
+
+        if (editorMode === 'view' && !suppressNodeDetails && finishedNodeDrag && finishedNodeDrag.nodeId) {
+            // Only open tooltip on left-button release when no drag movement occurred.
+            if (!finishedNodeDrag.moved) {
+                const node = topo && typeof topo.getNode === 'function' ? topo.getNode(finishedNodeDrag.nodeId) : null;
+                if (node && !isTooltipBlocked()) {
+                    const now = Date.now();
+                    lastNodeClickRecord = { nodeId: node.id(), ts: now };
+                    handleNodePrimaryClick(node, now);
+                    lastImmediateFocusTs = now;
+                }
+            }
+        }
 
         pendingBackgroundClick = null;
         backgroundPanState = null;
@@ -3866,6 +4073,204 @@
         modal.classList.remove('open');
     }
 
+    function setDeploymentAccessPanelVisible(visible) {
+        const panel = document.getElementById('deployAccessPanel');
+        if (!panel) return;
+        if (visible && activeMainTab === 'server') {
+            panel.classList.remove('open');
+            return;
+        }
+        panel.classList.toggle('open', !!visible);
+        if (visible) _initDeployAccessPanelDrag(panel);
+    }
+
+    function toggleDeploymentAccessPanel() {
+        const panel = document.getElementById('deployAccessPanel');
+        if (!panel) return;
+        const minimized = panel.classList.toggle('minimized');
+        const btn = document.getElementById('deployAccessMinimizeBtn');
+        if (btn) btn.innerHTML = minimized ? '&#9633;' : '&#8211;';
+    }
+
+    function _initDeployAccessPanelDrag(panel) {
+        if (panel._dragInit) return;
+        panel._dragInit = true;
+        const head = document.getElementById('deployAccessPanelHead');
+        const container = document.getElementById('topologyContainer');
+        if (!head) return;
+        let dragging = false, startX = 0, startY = 0, origLeft = 0, origTop = 0;
+        head.addEventListener('mousedown', function(e) {
+            if (e.target.tagName === 'BUTTON') return;
+            dragging = true;
+            const rect = panel.getBoundingClientRect();
+            const containerRect = container ? container.getBoundingClientRect() : { left: 0, top: 0 };
+            panel.style.right = 'auto';
+            panel.style.left = (rect.left - containerRect.left) + 'px';
+            panel.style.top = (rect.top - containerRect.top) + 'px';
+            origLeft = rect.left - containerRect.left;
+            origTop = rect.top - containerRect.top;
+            startX = e.clientX;
+            startY = e.clientY;
+            e.preventDefault();
+        });
+        document.addEventListener('mousemove', function(e) {
+            if (!dragging) return;
+            const dx = e.clientX - startX;
+            const dy = e.clientY - startY;
+            const maxLeft = container ? Math.max(0, container.clientWidth - panel.offsetWidth) : Math.max(0, window.innerWidth - panel.offsetWidth);
+            const maxTop = container ? Math.max(0, container.clientHeight - panel.offsetHeight) : Math.max(0, window.innerHeight - panel.offsetHeight);
+            const newLeft = Math.max(0, Math.min(origLeft + dx, maxLeft));
+            const newTop = Math.max(0, Math.min(origTop + dy, maxTop));
+            panel.style.left = newLeft + 'px';
+            panel.style.top = newTop + 'px';
+        });
+        document.addEventListener('mouseup', function() { dragging = false; });
+    }
+
+    function setDeploymentAccessStatus(message, isError) {
+        const statusEl = document.getElementById('deploy-access-status');
+        if (!statusEl) return;
+        statusEl.textContent = message || '';
+        statusEl.style.color = isError ? '#b91c1c' : '#64748b';
+    }
+
+    function renderDeploymentAccessRows(rows) {
+        const body = document.getElementById('deploy-access-body');
+        if (!body) return;
+
+        const list = Array.isArray(rows) ? rows : [];
+        if (list.length === 0) {
+            body.innerHTML = '<tr><td colspan="2">No deployed instances.</td></tr>';
+            return;
+        }
+
+        body.innerHTML = list.map(function(row) {
+            const hostname = escapeHtml(String(row.hostname || '-'));
+            if (row.error) {
+                const errText = String(row.error || 'SSH access failed');
+                return `<tr><td>${hostname}</td><td><span class="deploy-access-error">${escapeHtml(errText)}</span></td></tr>`;
+            }
+
+            const uri = String(row.uri || '');
+            const uriEsc = escapeHtml(uri);
+            return `<tr><td>${hostname}</td><td><a class="deploy-access-link" href="${uriEsc}" onclick="window.open(this.href); event.preventDefault(); return false;" rel="noopener noreferrer">${uriEsc}</a></td></tr>`;
+        }).join('');
+    }
+
+    function getNodeKindByNameMap() {
+        const kindByName = {};
+        if (!topo) return kindByName;
+
+        topo.eachNode(function(node) {
+            if (!node || !node.model || typeof node.model !== 'function') return;
+            const raw = (node.model().getData && node.model().getData()) || {};
+            const nodeName = String(raw.name || raw.id || '').trim();
+            const kind = String(raw.kind || '').trim();
+            if (nodeName && kind) kindByName[nodeName] = kind;
+        });
+
+        return kindByName;
+    }
+
+    function shortenRuntimeNodeName(labId, nodeName) {
+        const rawLabId = String(labId || '').trim();
+        const full = String(nodeName || '').trim();
+        if (!rawLabId || !full) return full;
+        const prefix = `clab-${rawLabId}-`;
+        return full.startsWith(prefix) ? full.slice(prefix.length) : full;
+    }
+
+    async function refreshDeploymentAccessPanel(labIdHint) {
+        const labId = String(labIdHint || currentLabId || getLabIdFromInput() || '').trim();
+        if (!labId) {
+            setDeploymentAccessStatus('No lab selected. Deploy first.', true);
+            renderDeploymentAccessRows([]);
+            return;
+        }
+
+        deploymentAccessPanelRequested = true;
+        setDeploymentAccessPanelVisible(true);
+        setDeploymentAccessStatus(`Loading SSH endpoints for ${labId}...`, false);
+
+        try {
+            const response = await clabFetch(`/labs/${encodeURIComponent(labId)}`);
+            const payload = await parseApiResponse(response);
+            ensureClabResponseOk(response, payload, `Failed to inspect lab ${labId}`);
+            const runtime = (payload && typeof payload === 'object') ? payload : {};
+            const runtimeNodes = Array.isArray(runtime.nodes_runtime) ? runtime.nodes_runtime : [];
+
+            if (runtimeNodes.length === 0) {
+                renderDeploymentAccessRows([]);
+                setDeploymentAccessStatus(`No runtime nodes were returned for ${labId}.`, true);
+                return;
+            }
+
+            const kindByName = getNodeKindByNameMap();
+            const rows = await Promise.all(runtimeNodes.map(async function(nodeRuntime) {
+                const fullNodeName = String((nodeRuntime && nodeRuntime.name) || '').trim();
+                const shortName = shortenRuntimeNodeName(labId, fullNodeName);
+                const kind = kindByName[shortName] || kindByName[fullNodeName] || '';
+                const loginName = getMappedLoginNameForKind(kind) || String(defaultLoginName || 'admin').trim() || 'admin';
+
+                try {
+                    const sshResp = await clabFetch(
+                        `/labs/${encodeURIComponent(labId)}/nodes/${encodeURIComponent(fullNodeName)}/ssh`,
+                        {
+                            method: 'POST',
+                            body: JSON.stringify({ sshUsername: loginName }),
+                        }
+                    );
+                    const sshPayload = await parseApiResponse(sshResp);
+                    ensureClabResponseOk(sshResp, sshPayload, `Failed to request SSH for ${shortName}`);
+
+                    // Use the containerlab server's IP (from remoteServerUrl) as SSH host;
+                    // the SSH port comes from the API response.
+                    let host = String((sshPayload && sshPayload.host) || '').trim();
+                    if (remoteServerUrl) {
+                        try {
+                            const serverHostname = new URL(remoteServerUrl).hostname;
+                            if (serverHostname) host = serverHostname;
+                        } catch (e) {}
+                    }
+                    const port = Number(sshPayload && sshPayload.port);
+                    const user = String((sshPayload && sshPayload.username) || loginName || 'admin').trim() || 'admin';
+
+                    if (!host || !Number.isFinite(port) || port <= 0) {
+                        return {
+                            hostname: shortName || fullNodeName,
+                            error: 'SSH host/port missing in API response',
+                        };
+                    }
+
+                    return {
+                        hostname: shortName || fullNodeName,
+                        uri: `ssh://${user}@${host}:${port}`,
+                    };
+                } catch (error) {
+                    return {
+                        hostname: shortName || fullNodeName,
+                        error: error.message || String(error),
+                    };
+                }
+            }));
+
+            rows.sort(function(a, b) {
+                return String(a.hostname || '').localeCompare(String(b.hostname || ''));
+            });
+            renderDeploymentAccessRows(rows);
+            const successCount = rows.filter(function(item) { return !!item.uri; }).length;
+            setDeploymentAccessStatus(`Loaded ${successCount}/${rows.length} SSH URIs for ${labId}.`, successCount === 0);
+        } catch (error) {
+            renderDeploymentAccessRows([]);
+            setDeploymentAccessStatus(`Failed to load instance access info: ${error.message || error}`, true);
+        }
+    }
+
+    function closeDeploymentAccessPanel() {
+        deploymentAccessPanelRequested = false;
+        setDeploymentAccessPanelVisible(false);
+    }
+
     /**
      * Deploy the currently-drawn topology to clab-api-server
      */
@@ -3883,6 +4288,7 @@
             startLabStatusPolling();
             alert(`Lab deployed: ${deployedLabId}`);
             await fetchTopology();
+            await refreshDeploymentAccessPanel(deployedLabId);
             updateStatusPanel();
         } catch (err) {
             alert(`Deploy failed: ${err}`);
@@ -3954,6 +4360,10 @@
                         applyNodePositionsFromDataWithRetry(0);
                         updateNodeCoordinateDebugLabels();
                         updateStatusPanel();
+                        // Auto-show SSH access panel if a lab was already running on startup
+                        if (currentLabId && remoteServerUrl && remoteAuthToken) {
+                            refreshDeploymentAccessPanel(currentLabId);
+                        }
                     }, this);
                 }).catch(error => {
                     console.error("Failed to load topology:", error);
@@ -4019,6 +4429,9 @@
         refreshRemoteMetricsNow,
         saveKindImageMapping,
         removeKindImageMapping,
+        refreshDeploymentAccessPanel,
+        closeDeploymentAccessPanel,
+        toggleDeploymentAccessPanel,
     };
 
     // Initialize on DOM ready
