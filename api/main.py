@@ -18,7 +18,7 @@ import yaml
 from models.topology import (
     RuntimeLabState, ImageInfo, VersionInfo
 )
-from clab.api_client import create_api_client, ClabAPIClient
+from clab.api_client import create_api_client, ClabAPIClient, RemoteAPIError
 
 # Create FastAPI app
 app = FastAPI(
@@ -101,6 +101,57 @@ def _sanitize_login_name(value: Any) -> str:
     return login_name
 
 
+def _normalize_interface_rule(rule: Any) -> Dict[str, Any]:
+    if not isinstance(rule, dict):
+        return {}
+
+    style = str(rule.get("style") or "").strip()
+    prefix = str(rule.get("prefix") or "").strip()
+    start_raw = rule.get("start", 0)
+    max_raw = rule.get("max", 16)
+
+    try:
+        start = int(start_raw)
+    except Exception:
+        raise HTTPException(status_code=400, detail="interface_rule.start must be an integer")
+
+    try:
+        max_count = int(max_raw)
+    except Exception:
+        raise HTTPException(status_code=400, detail="interface_rule.max must be an integer")
+
+    if not prefix:
+        raise HTTPException(status_code=400, detail="interface_rule.prefix is required")
+    if max_count <= 0:
+        raise HTTPException(status_code=400, detail="interface_rule.max must be > 0")
+
+    normalized: Dict[str, Any] = {
+        "prefix": prefix,
+        "start": start,
+        "max": max_count,
+    }
+    if style:
+        normalized["style"] = style
+    return normalized
+
+
+def _normalize_reserved_interfaces(value: Any) -> List[str]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise HTTPException(status_code=400, detail="reserved_interfaces must be a list")
+
+    result: List[str] = []
+    seen = set()
+    for item in value:
+        label = str(item or "").strip()
+        if not label or label in seen:
+            continue
+        seen.add(label)
+        result.append(label)
+    return result
+
+
 def _read_kind_image_login_store() -> Dict[str, Any]:
     if not KIND_IMAGE_LOGIN_STORE_FILE.exists():
         return {
@@ -118,7 +169,7 @@ def _read_kind_image_login_store() -> Dict[str, Any]:
 
     default_login_name = _sanitize_login_name(data.get("default_login_name") or "admin") or "admin"
     mappings_raw = data.get("mappings") if isinstance(data, dict) else {}
-    mappings: Dict[str, Dict[str, str]] = {}
+    mappings: Dict[str, Dict[str, Any]] = {}
 
     if isinstance(mappings_raw, dict):
         for kind, item in mappings_raw.items():
@@ -129,10 +180,22 @@ def _read_kind_image_login_store() -> Dict[str, Any]:
             login_name = _sanitize_login_name(item.get("login_name") or "")
             if not image:
                 continue
-            mappings[kind_key] = {
+            entry: Dict[str, Any] = {
                 "image": image,
                 "login_name": login_name or default_login_name,
             }
+            interface_rule_raw = item.get("interface_rule")
+            if isinstance(interface_rule_raw, dict):
+                try:
+                    entry["interface_rule"] = _normalize_interface_rule(interface_rule_raw)
+                except HTTPException:
+                    pass
+
+            reserved_raw = item.get("reserved_interfaces")
+            if isinstance(reserved_raw, list):
+                entry["reserved_interfaces"] = _normalize_reserved_interfaces(reserved_raw)
+
+            mappings[kind_key] = entry
 
     return {
         "default_login_name": default_login_name,
@@ -155,7 +218,13 @@ def _get_kind_image_login_settings() -> Dict[str, Any]:
         }
 
 
-def _set_kind_image_login_mapping(kind: str, image: str, login_name: str) -> Dict[str, Any]:
+def _set_kind_image_login_mapping(
+    kind: str,
+    image: str,
+    login_name: str,
+    interface_rule: Any = None,
+    reserved_interfaces: Any = None,
+) -> Dict[str, Any]:
     kind_key = str(kind or "").strip()
     image_value = str(image or "").strip()
     login_value = _sanitize_login_name(login_name)
@@ -170,10 +239,16 @@ def _set_kind_image_login_mapping(kind: str, image: str, login_name: str) -> Dic
     with _kind_image_login_lock:
         store = _read_kind_image_login_store()
         mappings = store.get("mappings") if isinstance(store.get("mappings"), dict) else {}
-        mappings[kind_key] = {
+        entry: Dict[str, Any] = {
             "image": image_value,
             "login_name": login_value,
         }
+        if interface_rule is not None:
+            entry["interface_rule"] = _normalize_interface_rule(interface_rule)
+        if reserved_interfaces is not None:
+            entry["reserved_interfaces"] = _normalize_reserved_interfaces(reserved_interfaces)
+
+        mappings[kind_key] = entry
         payload = {
             "default_login_name": store.get("default_login_name") or "admin",
             "mappings": mappings,
@@ -339,11 +414,24 @@ async def get_kind_image_login_settings():
 
 @app.put("/api/settings/kind-image-login")
 async def set_kind_image_login_settings(payload: Dict[str, Any]):
-    """Upsert a kind/image/login_name mapping persisted on the server."""
+    """Upsert a kind/image/login_name mapping persisted on the server.
+
+    Optional fields:
+    - interface_rule: {style?, prefix, start, max}
+    - reserved_interfaces: ["ifName", ...]
+    """
     kind = payload.get("kind")
     image = payload.get("image")
     login_name = payload.get("login_name")
-    return _set_kind_image_login_mapping(kind=kind, image=image, login_name=login_name)
+    interface_rule = payload.get("interface_rule")
+    reserved_interfaces = payload.get("reserved_interfaces")
+    return _set_kind_image_login_mapping(
+        kind=kind,
+        image=image,
+        login_name=login_name,
+        interface_rule=interface_rule,
+        reserved_interfaces=reserved_interfaces,
+    )
 
 
 @app.put("/api/settings/default-login-name")
@@ -507,6 +595,8 @@ async def request_node_ssh_access(
     try:
         access = await client.request_node_ssh_access(lab_id, node_name, payload)
         return access
+    except RemoteAPIError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail)
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 

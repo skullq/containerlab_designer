@@ -6,6 +6,9 @@
         <link rel="stylesheet" href="next_sources/css/next.css">
         <link rel="stylesheet" href="styles_main_page.css">
         <script src="next_sources/js/next.js"></script>
+        <script src="app_modules/render_helpers.js"></script>
+        <script src="app_modules/interaction_controller.js"></script>
+        <script src="app_modules/remote_session_manager.js"></script>
         <!-- Use new API-aware version -->
         <script src="next_app_v2.js"></script>
         <style>
@@ -337,13 +340,35 @@
                 background: #fbfdff;
             }
             .deploy-access-link {
-                color: #1d4ed8;
-                text-decoration: none;
+                display: inline-flex;
+                align-items: center;
+                max-width: 100%;
+                padding: 4px 9px;
+                border: 1px solid #c7dcff;
+                border-radius: 999px;
+                background: linear-gradient(180deg, #f8fbff 0%, #eff6ff 100%);
+                color: #1e40af;
+                font-family: Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+                font-size: 11px;
                 white-space: nowrap;
+                text-overflow: ellipsis;
+                overflow: hidden;
+                text-decoration: none;
                 cursor: pointer;
+                transition: background-color 0.16s ease, border-color 0.16s ease, color 0.16s ease, box-shadow 0.16s ease;
             }
             .deploy-access-link:hover {
-                text-decoration: underline;
+                background: linear-gradient(180deg, #eef5ff 0%, #dbeafe 100%);
+                border-color: #93c5fd;
+                color: #1d4ed8;
+                box-shadow: 0 2px 8px rgba(37, 99, 235, 0.14);
+            }
+            .deploy-access-link:focus-visible {
+                outline: none;
+                box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.3);
+            }
+            .deploy-access-link:visited {
+                color: #1e40af;
             }
             .deploy-access-error {
                 color: #b91c1c;
@@ -739,23 +764,78 @@
 
             <div class="control-section server-full" style="align-items:flex-start;">
                 <h4>Kind → Image Registry</h4>
-                <select id="registry-kind-select" class="dev-input"></select>
-                <input id="registry-image-input" class="dev-input" type="text" placeholder="e.g. ghcr.io/nokia/srlinux:24.10.1">
-                <input id="registry-login-input" class="dev-input" type="text" placeholder="Initial login_name (e.g. admin)">
+                <div style="display:flex;align-items:center;gap:8px;width:100%;flex-wrap:wrap;">
+                    <span style="min-width:170px;font-size:12px;font-weight:600;color:#334155;">Kind :</span>
+                    <select id="registry-kind-select" class="dev-input" style="flex:1;min-width:220px;"></select>
+                    <span style="font-size:11px;color:#64748b;">(Device kind key, e.g. cisco_xrd)</span>
+                </div>
+                <div style="display:flex;align-items:center;gap:8px;width:100%;flex-wrap:wrap;">
+                    <span style="min-width:170px;font-size:12px;font-weight:600;color:#334155;">Image :</span>
+                    <input id="registry-image-input" class="dev-input" type="text" placeholder="e.g. ghcr.io/nokia/srlinux:24.10.1" style="flex:1;min-width:220px;">
+                    <span style="font-size:11px;color:#64748b;">(Container image used in YAML/deploy)</span>
+                </div>
+                <div style="display:flex;align-items:center;gap:8px;width:100%;flex-wrap:wrap;">
+                    <span style="min-width:170px;font-size:12px;font-weight:600;color:#334155;">Login Name :</span>
+                    <input id="registry-login-input" class="dev-input" type="text" placeholder="Initial login_name (e.g. admin)" style="flex:1;min-width:220px;">
+                    <span style="font-size:11px;color:#64748b;">(Default SSH username)</span>
+                </div>
+                <div style="display:flex;align-items:center;gap:8px;width:100%;flex-wrap:wrap;">
+                    <span style="min-width:170px;font-size:12px;font-weight:600;color:#334155;">Interface Prefix :</span>
+                    <input id="registry-if-prefix-input" class="dev-input" type="text" placeholder="Interface prefix (e.g. Ethernet1/)" style="flex:1;min-width:220px;">
+                    <span style="font-size:11px;color:#64748b;">(Auto link interface prefix)</span>
+                </div>
+                <div style="display:flex;align-items:center;gap:8px;width:100%;flex-wrap:wrap;">
+                    <span style="min-width:170px;font-size:12px;font-weight:600;color:#334155;">Interface Style :</span>
+                    <input id="registry-if-style-input" class="dev-input" type="text" placeholder="Style tag (optional)" style="flex:1;min-width:220px;">
+                    <span style="font-size:11px;color:#64748b;">(Optional metadata tag)</span>
+                </div>
+                <div style="display:flex;align-items:center;gap:8px;width:100%;flex-wrap:wrap;">
+                    <span style="min-width:170px;font-size:12px;font-weight:600;color:#334155;">Interface Start :</span>
+                    <input id="registry-if-start-input" class="dev-input" type="number" placeholder="Start" style="flex:1;min-width:220px;">
+                    <span style="font-size:11px;color:#64748b;">(First interface index)</span>
+                </div>
+                <div style="display:flex;align-items:center;gap:8px;width:100%;flex-wrap:wrap;">
+                    <span style="min-width:170px;font-size:12px;font-weight:600;color:#334155;">Interface Max :</span>
+                    <input id="registry-if-max-input" class="dev-input" type="number" placeholder="Max" style="flex:1;min-width:220px;">
+                    <span style="font-size:11px;color:#64748b;">(Range size: start..start+max-1)</span>
+                </div>
+                <div style="display:flex;align-items:center;gap:8px;width:100%;flex-wrap:wrap;">
+                    <span style="min-width:170px;font-size:12px;font-weight:600;color:#334155;">Reserved Ifs :</span>
+                    <input id="registry-if-reserved-input" class="dev-input" type="text" placeholder="Reserved interfaces (comma-separated)" style="flex:1;min-width:220px;">
+                    <span style="font-size:11px;color:#64748b;">(Excluded from data links)</span>
+                </div>
                 <button class="success" onclick="nextUI.saveKindImageMapping()">Save/Update</button>
                 <button class="secondary" onclick="nextUI.removeKindImageMapping()">Remove</button>
-                <div id="kind-image-status">Register image names from docker images output for each kind.</div>
+                <div id="kind-image-status">Register image/login/interface naming rules per kind.</div>
+
+                <div style="width:100%;border:1px solid #dbe3ee;border-radius:8px;background:#f8fafc;padding:8px;">
+                    <div style="font-size:12px;font-weight:700;color:#334155;margin-bottom:6px;">YAML Export Interpretation Test</div>
+                    <div style="display:flex;align-items:center;gap:8px;width:100%;flex-wrap:wrap;">
+                        <span style="min-width:170px;font-size:12px;font-weight:600;color:#334155;">Source If Input :</span>
+                        <input id="registry-test-src-if" class="dev-input" type="text" value="eth0" style="flex:1;min-width:180px;">
+                        <span style="font-size:11px;color:#64748b;">(Raw input before YAML normalization)</span>
+                    </div>
+                    <div style="display:flex;align-items:center;gap:8px;width:100%;flex-wrap:wrap;margin-top:6px;">
+                        <span style="min-width:170px;font-size:12px;font-weight:600;color:#334155;">Target If Input :</span>
+                        <input id="registry-test-tgt-if" class="dev-input" type="text" value="eth1" style="flex:1;min-width:180px;">
+                        <button class="secondary" onclick="nextUI.refreshKindYamlInterpretationPreview()">Refresh Preview</button>
+                    </div>
+                    <textarea id="registry-yaml-preview" class="dev-input" readonly style="width:100%;margin-top:8px;min-height:120px;font-family:Menlo,Monaco,Consolas,'Courier New',monospace;font-size:11px;line-height:1.35;"></textarea>
+                </div>
+
                 <div class="mapping-table-wrap">
                     <table class="mapping-table">
                         <thead>
                             <tr>
-                                <th>Kind</th>
-                                <th>Image</th>
-                                <th>Login Name</th>
+                                <th title="Device kind key">Kind</th>
+                                <th title="Container image">Image</th>
+                                <th title="Default SSH username">Login Name</th>
+                                <th title="Auto-generated interface naming rule">Interface Rule</th>
+                                <th title="Interfaces excluded from data links">Reserved Ifs</th>
                             </tr>
                         </thead>
                         <tbody id="kind-image-mapping-body">
-                            <tr><td colspan="3">No mappings registered.</td></tr>
+                            <tr><td colspan="5">No mappings registered.</td></tr>
                         </tbody>
                     </table>
                 </div>
@@ -801,7 +881,6 @@
         <div id="nodeContextMenu" class="node-context-menu">
             <button id="ctxAddLinkBtn" onclick="nextUI.startAddLinkFromContextMenu()">Add Link</button>
             <button id="ctxDeleteNodeBtn" onclick="nextUI.deleteNodeFromContextMenu()">Delete Node</button>
-            <button id="ctxConnectBtn" onclick="nextUI.connectFromContextMenu()">SSH Connect</button>
         </div>
 
         <!-- Footer -->

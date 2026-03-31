@@ -22,14 +22,18 @@
 containerlab_designer/
 ├── api/
 │   └── main.py                 # FastAPI 앱, API 라우트, 정적 파일 서빙
+├── app_modules/
+│   ├── remote_session_manager.js   # 원격 인증/토큰/폴링 모듈
+│   ├── interaction_controller.js   # 전역 리스너/배경 팬 모듈
+│   └── render_helpers.js           # kind-image/deploy access 테이블 렌더 모듈
 ├── clab/
 │   ├── api_client.py           # Mock/Real 분기 클라이언트
 │   ├── mock_server.py          # Mock 동작/샘플 데이터
 │   └── node_layouts.json       # (런타임 생성) 레이아웃 저장 파일
 ├── models/
 │   └── topology.py             # Pydantic 모델
-├── main_api_v2.html            # UI(컨트롤 패널 + topology canvas)
-├── next_app_v2.js              # 프론트 로직(API 호출/편집/내보내기)
+├── main_api_v2.html            # UI(콘트롤 패널 + topology canvas)
+├── next_app_v2.js              # 프론트 코어 로직(API 호출/편집/내보내기)
 ├── QUICKSTART.md               # 빠른 실행 가이드
 └── IMPLEMENTATION_GUIDE.md     # 본 문서
 ```
@@ -67,7 +71,16 @@ containerlab_designer/
 - `exec_node()`, `save_node_config()`, `get_node_logs()`
 - `get_graph()`
 
-### 3) Mock 서버 (`clab/mock_server.py`)
+### 2) 원격 세션 모듈 (`app_modules/remote_session_manager.js`)
+
+`createRemoteSessionManager(deps)` 팩토리 패턴으로 생성됩니다.
+
+- `connect(url, password)` → `/api/tester/login` 프록시 호출 후 JWT 저장
+- `startPolling()` / `stopPolling()` → 주기적 lab 상태 폴링
+- 토큰 자동 갱신 (`loginAndStoreToken`) 포함
+- 원격 요청은 `/api/tester/request` 프록시를 경유
+
+### 3) 개발 서버 (`clab/mock_server.py`)
 
 역할:
 
@@ -109,9 +122,16 @@ containerlab_designer/
 - YAML Export 모달
 - Link Interface 선택 모달
 
-### 2) 로직 파일 (`next_app_v2.js`)
+### 2) 로직 파일 (`next_app_v2.js` + `app_modules/`)
 
-주요 동작:
+모듈 구조:
+
+- `remote_session_manager.js` → `window.createRemoteSessionManager` 노출
+- `interaction_controller.js` → `window.createInteractionController` 노출
+- `render_helpers.js` → `window.NextUIRenderHelpers` 노출
+- `next_app_v2.js` → 위 3개 모듈 로드 후 IIFE 실행
+
+`next_app_v2.js` 코어 주요 동작:
 
 - API 연동: lab 조회/배포/삭제, 노드 명령/로그/연결 정보
 - 에디터: 노드 추가, 링크 추가, 노드 삭제
@@ -147,7 +167,7 @@ containerlab_designer/
 UI Deploy 버튼
   -> deployCurrentTopology()
   -> 현재 노드/링크를 TopologySpec 형태로 변환
-  -> POST /api/clab/labs
+  -> POST /api/clab/labs/deploy-yaml
   -> 응답 lab_id 저장
   -> fetchTopology() 재호출로 그래프 동기화
 ```
@@ -178,6 +198,18 @@ UI Deploy 버튼
 
 - `GET /health`
 
+### 원격 세셔 (CORS 프록시)
+
+- `POST /api/tester/login`
+- `POST /api/tester/request`
+
+### 설정
+
+- `GET /api/settings/kind-image-login`
+- `PUT /api/settings/kind-image-login`
+- `DELETE /api/settings/kind-image-login/{kind}`
+- `PUT /api/settings/default-login-name`
+
 ### 정보
 
 - `GET /api/clab/images`
@@ -185,7 +217,7 @@ UI Deploy 버튼
 
 ### Lab
 
-- `POST /api/clab/labs`
+- `POST /api/clab/labs/deploy-yaml`
 - `GET /api/clab/labs`
 - `GET /api/clab/labs/{lab_id}`
 - `DELETE /api/clab/labs/{lab_id}`
@@ -196,6 +228,7 @@ UI Deploy 버튼
 - `POST /api/clab/labs/{lab_id}/nodes/{node_name}/exec`
 - `POST /api/clab/labs/{lab_id}/nodes/{node_name}/save`
 - `GET /api/clab/labs/{lab_id}/nodes/{node_name}/logs`
+- `POST /api/clab/labs/{lab_id}/nodes/{node_name}/ssh`
 
 ### Layout
 

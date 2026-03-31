@@ -52,11 +52,25 @@
 
 ### ⏳ Phase 3: 향후 (plan.md 참고)
 
-- [ ] 토폴로지 편집 UI (노드/링크 추가)
+- [x] 토폴로지 편집 UI (노드/링크 추가, 노드 삭제, YAML Export)
 - [ ] pyATS 설정 자동화
 - [ ] 자연어 intent 변환
 - [ ] 웹 터미널 통합
 - [ ] DB 영속 저장소
+
+### ✅ Phase 4: 코드 구조화 & 리팩터링 (완료)
+
+**완료 항목:**
+- [x] `app_modules/remote_session_manager.js` - 원격 인증/토큰/폴링 책임 분리
+- [x] `app_modules/interaction_controller.js` - 전역 리스너/배경 팬 책임 분리
+- [x] `app_modules/render_helpers.js` - kind-image 테이블, deploy access 테이블 렌더 분리
+- [x] `AppState` 네임스페이스 도입 (`topology`, `remote`, `interaction`, `ui`)
+- [x] `updateCurrentLabId()` 헬퍼로 labId 중앙화
+- [x] `closeAllTopologyTooltips()`, `openTopologyNodeTooltip()` tooltip 헬퍼 함수 추가
+- [x] kind-image 테이블 XSS 위험 제거 (`escapeHtml` 적용)
+- [x] Logger 사용 통일 (`console.warn/error` 대신 `Logger.*`)
+
+**현재 상태**: ✅ 정적 오류 없음. 모듈 로드 HTTP 200 확인. 자동화 엔드포인트 체크 10/10 PASS.
 
 ---
 

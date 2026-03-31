@@ -9,6 +9,10 @@
      */
     const API_BASE_URL = "http://localhost:8000/api";
     const CLAB_API = API_BASE_URL + "/clab";
+    const Logger = {
+        warn: function() { console.warn.apply(console, arguments); },
+        error: function() { console.error.apply(console, arguments); },
+    };
 
     // Global state
     let currentTopology = null;
@@ -48,6 +52,12 @@
     const MGMT_IP_PREFIX = '172.31.255';
     const LAYOUT_STORAGE_PREFIX = 'next_ui.layout.';
     const TOPOLOGY_SNAPSHOT_KEY = 'next_ui.topology_snapshot.v1';
+    const REMOTE_STORAGE_KEYS = {
+        serverUrl: 'next_ui.remote_server_url',
+        username: 'next_ui.remote_username',
+        token: 'next_ui.remote_token',
+        password: 'next_ui.remote_password',
+    };
     const DEBUG_SHOW_NODE_COORD_LABEL = true;
     let mgmtHostCounter = 10;
     let topologyApp = null;
@@ -82,6 +92,33 @@
     };
 
     let pendingRestoreCoordMap = null;
+    const AppState = {
+        topology: {
+            currentLabId: null,
+            selectedNodeInfo: null,
+        },
+        remote: {
+            serverUrl: '',
+            authToken: '',
+            passwordCache: '',
+        },
+        interaction: {
+            mode: 'view',
+            pendingNodeDrag: null,
+            backgroundPanState: null,
+        },
+        ui: {
+            activeMainTab: 'topology',
+            deploymentAccessPanelRequested: false,
+        },
+    };
+
+    function updateCurrentLabId(nextLabId) {
+        const normalized = String(nextLabId || '').trim();
+        currentLabId = normalized || null;
+        AppState.topology.currentLabId = currentLabId;
+        return currentLabId;
+    }
 
     function isTooltipBlocked(nowTs) {
         const now = Number.isFinite(nowTs) ? nowTs : Date.now();
@@ -205,6 +242,63 @@
         }
     }
 
+    function hasRemoteSession() {
+        return !!(remoteServerUrl && remoteAuthToken);
+    }
+
+    function readStoredRemoteSession() {
+        return {
+            serverUrl: String(localStorage.getItem(REMOTE_STORAGE_KEYS.serverUrl) || '').trim(),
+            username: String(localStorage.getItem(REMOTE_STORAGE_KEYS.username) || '').trim(),
+            token: String(localStorage.getItem(REMOTE_STORAGE_KEYS.token) || '').trim(),
+            password: String(sessionStorage.getItem(REMOTE_STORAGE_KEYS.password) || ''),
+        };
+    }
+
+    function persistRemoteSession(session) {
+        if (!session || typeof session !== 'object') return;
+
+        if (Object.prototype.hasOwnProperty.call(session, 'serverUrl')) {
+            const value = String(session.serverUrl || '').trim();
+            if (value) localStorage.setItem(REMOTE_STORAGE_KEYS.serverUrl, value);
+            else localStorage.removeItem(REMOTE_STORAGE_KEYS.serverUrl);
+        }
+
+        if (Object.prototype.hasOwnProperty.call(session, 'username')) {
+            const value = String(session.username || '').trim();
+            if (value) localStorage.setItem(REMOTE_STORAGE_KEYS.username, value);
+            else localStorage.removeItem(REMOTE_STORAGE_KEYS.username);
+        }
+
+        if (Object.prototype.hasOwnProperty.call(session, 'token')) {
+            const value = String(session.token || '').trim();
+            if (value) localStorage.setItem(REMOTE_STORAGE_KEYS.token, value);
+            else localStorage.removeItem(REMOTE_STORAGE_KEYS.token);
+        }
+
+        if (Object.prototype.hasOwnProperty.call(session, 'password')) {
+            const value = String(session.password || '');
+            if (value) sessionStorage.setItem(REMOTE_STORAGE_KEYS.password, value);
+            else sessionStorage.removeItem(REMOTE_STORAGE_KEYS.password);
+        }
+    }
+
+    function updateRemoteSessionState(session) {
+        if (!session || typeof session !== 'object') return;
+        if (Object.prototype.hasOwnProperty.call(session, 'serverUrl')) {
+            remoteServerUrl = String(session.serverUrl || '').trim();
+            AppState.remote.serverUrl = remoteServerUrl;
+        }
+        if (Object.prototype.hasOwnProperty.call(session, 'token')) {
+            remoteAuthToken = String(session.token || '').trim();
+            AppState.remote.authToken = remoteAuthToken;
+        }
+        if (Object.prototype.hasOwnProperty.call(session, 'password')) {
+            remotePasswordCache = String(session.password || '');
+            AppState.remote.passwordCache = remotePasswordCache;
+        }
+    }
+
     function getLabIdFromInput() {
         const el = document.getElementById('lab-name-input');
         const value = el ? String(el.value || '').trim() : '';
@@ -243,6 +337,8 @@
         const targetLabId = String(labIdHint || currentLabId || getLabIdFromInput() || '').trim();
         if (!targetLabId) {
             setLabRuntimeIndicator('idle', 'No active lab');
+            setDeploymentAccessStatus('Lab is not running. No connectable instances.', true);
+            renderDeploymentAccessRows([]);
             return null;
         }
 
@@ -251,14 +347,19 @@
             const payload = await parseApiResponse(response);
             if (response.status === 404) {
                 setLabRuntimeIndicator('not-found', `${targetLabId} · not running or not found`);
+                setDeploymentAccessStatus(`Lab ${targetLabId} is not running. No connectable instances.`, true);
+                renderDeploymentAccessRows([]);
                 return null;
             }
 
             ensureClabResponseOk(response, payload, `Failed to inspect lab ${targetLabId}`);
             const runtime = (payload && typeof payload === 'object') ? payload : {};
-            currentLabId = runtime.lab_id || runtime.lab_name || targetLabId;
+            updateCurrentLabId(runtime.lab_id || runtime.lab_name || targetLabId);
             const summary = summarizeLabState(runtime);
             setLabRuntimeIndicator(summary.status, summary.detail);
+            refreshDeploymentAccessPanel(currentLabId).catch(function(error) {
+                Logger.warn('Failed to auto-refresh deployment access panel:', error);
+            });
             return runtime;
         } catch (error) {
             setLabRuntimeIndicator('error', `Status check failed · ${error.message || error}`);
@@ -289,12 +390,12 @@
             const labs = Array.isArray(data.labs) ? data.labs : [];
 
             if (labs.length === 0) {
-                currentLabId = null;
+                updateCurrentLabId(null);
                 setLabRuntimeIndicator('not-running', 'No running labs');
                 return null;
             }
 
-            currentLabId = resolveLabId(labs[0]);
+            updateCurrentLabId(resolveLabId(labs[0]));
             if (!currentLabId) {
                 setLabRuntimeIndicator('unknown', 'Lab discovered but identifier missing');
                 return null;
@@ -338,246 +439,41 @@
         return exp - nowEpoch;
     }
 
-    function stopTokenRefreshScheduler() {
-        if (tokenRefreshTimer) {
-            clearTimeout(tokenRefreshTimer);
-            tokenRefreshTimer = null;
-        }
-    }
-
-    async function loginRemoteServerAndGetToken(serverUrl, username, password) {
-        const response = await fetch('/api/tester/login', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                serverUrl,
-                username,
-                password,
-            }),
-        });
-        const data = await response.json();
-        if (!response.ok) {
-            const detail = data && data.detail ? data.detail : 'Login failed';
-            throw new Error(typeof detail === 'string' ? detail : JSON.stringify(detail));
-        }
-        if (!data.token) {
-            throw new Error('Login succeeded but token is missing.');
-        }
-        return String(data.token);
-    }
-
-    function scheduleTokenAutoRefresh() {
-        stopTokenRefreshScheduler();
-        if (!remoteServerUrl || !remoteAuthToken) return;
-
-        const expiresInSec = getTokenExpiresInSeconds(remoteAuthToken);
-        if (!Number.isFinite(expiresInSec)) return;
-
-        // Refresh 60s before expiry; if already near expiry, refresh almost immediately.
-        const refreshInSec = Math.max(5, Number(expiresInSec) - 60);
-        tokenRefreshTimer = setTimeout(function() {
-            refreshRemoteTokenSilently('scheduled');
-        }, refreshInSec * 1000);
-    }
-
-    async function refreshRemoteTokenSilently(reason) {
-        if (tokenRefreshInFlight) return tokenRefreshInFlight;
-
-        const urlEl = document.getElementById('remote-server-url');
-        const userEl = document.getElementById('remote-username');
-        const serverUrl = String((urlEl && urlEl.value) || localStorage.getItem('next_ui.remote_server_url') || remoteServerUrl || '').trim();
-        const username = String((userEl && userEl.value) || localStorage.getItem('next_ui.remote_username') || '').trim();
-        const password = String(remotePasswordCache || sessionStorage.getItem('next_ui.remote_password') || '');
-
-        tokenRefreshInFlight = (async function() {
-            try {
-                if (!serverUrl || !username || !password) {
-                    throw new Error('Cannot auto-refresh token: cached credentials are missing. Reconnect once to enable auto-refresh.');
-                }
-
-                const newToken = await loginRemoteServerAndGetToken(serverUrl, username, password);
-                remoteServerUrl = serverUrl;
-                remoteAuthToken = newToken;
-                localStorage.setItem('next_ui.remote_server_url', remoteServerUrl);
-                localStorage.setItem('next_ui.remote_username', username);
-                localStorage.setItem('next_ui.remote_token', remoteAuthToken);
-                scheduleTokenAutoRefresh();
-                return true;
-            } catch (e) {
-                console.warn('Token auto-refresh failed (' + String(reason || 'n/a') + '):', e);
-                setServerAuthStatus(`Token auto-refresh failed: ${e.message || e}`, true);
-                return false;
-            } finally {
-                tokenRefreshInFlight = null;
-            }
-        })();
-
-        return tokenRefreshInFlight;
-    }
-
-    function summarizeRemoteErrorData(data) {
-        if (data == null) return '';
-        if (typeof data === 'string') return data;
-        if (typeof data !== 'object') return String(data);
-        if (data.detail) return typeof data.detail === 'string' ? data.detail : JSON.stringify(data.detail);
-        if (data.message) return String(data.message);
-        return JSON.stringify(data);
-    }
-
-    async function proxyRemoteRequest(method, endpoint, body) {
-        const response = await fetch('/api/tester/request', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                serverUrl: remoteServerUrl,
-                method,
-                endpoint,
-                token: remoteAuthToken,
-                body: body || null,
-            }),
-        });
-        const payload = await response.json();
-        if (!response.ok) {
-            const detail = payload && payload.detail ? payload.detail : 'Proxy request failed';
-            throw new Error(typeof detail === 'string' ? detail : JSON.stringify(detail));
-        }
-        return payload;
-    }
-
-    async function refreshRemoteMetricsNow() {
-        if (!remoteServerUrl || !remoteAuthToken) {
-            setRemoteApiIndicator(false, 'Disconnected');
-            setRemoteMetrics(NaN, NaN);
-            return;
-        }
-
-        if (isTokenExpired(remoteAuthToken)) {
-            const refreshed = await refreshRemoteTokenSilently('expired-check');
-            if (!refreshed && isTokenExpired(remoteAuthToken)) {
-                disconnectRemoteServer();
-                setServerAuthStatus('Saved token expired. Please reconnect with username/password.', true);
-                return;
-            }
-        }
-
-        try {
-            const result = await proxyRemoteRequest('GET', '/api/v1/health/metrics');
-            const status = Number(result && result.status);
-            const data = result ? result.data : null;
-            const metrics = data && data.metrics ? data.metrics : null;
-            const cpu = metrics && metrics.cpu ? Number(metrics.cpu.usagePercent) : NaN;
-            const mem = metrics && metrics.mem ? Number(metrics.mem.usagePercent) : NaN;
-
-            if (status >= 200 && status < 300) {
-                setRemoteApiIndicator(true, `Connected (${status})`);
-                setRemoteMetrics(cpu, mem);
-                setServerAuthStatus('Connected. Polling metrics every 5 seconds.', false);
-            } else if (status === 401 || status === 403) {
-                const errorText = summarizeRemoteErrorData(data);
-                disconnectRemoteServer();
-                setServerAuthStatus(`Remote auth failed (${status})${errorText ? `: ${errorText}` : ''}. Please reconnect.`, true);
-            } else {
-                const errorText = summarizeRemoteErrorData(data);
-                setRemoteApiIndicator(false, `Error (${status})`);
-                setRemoteMetrics(NaN, NaN);
-                setServerAuthStatus(`Metrics request failed (${status})${errorText ? `: ${errorText}` : ''}.`, true);
-            }
-        } catch (e) {
-            setRemoteApiIndicator(false, 'Disconnected');
-            setRemoteMetrics(NaN, NaN);
-            setServerAuthStatus(`Metrics error: ${e.message}`, true);
-        }
-    }
-
-    function startRemoteMetricsPolling() {
-        if (remoteMetricsTimer) {
-            clearInterval(remoteMetricsTimer);
-        }
-        refreshRemoteMetricsNow();
-        remoteMetricsTimer = setInterval(refreshRemoteMetricsNow, 5000);
-    }
-
-    function stopRemoteMetricsPolling() {
-        if (remoteMetricsTimer) {
-            clearInterval(remoteMetricsTimer);
-            remoteMetricsTimer = null;
-        }
-    }
-
-    function startLabStatusPolling(onFirstComplete) {
-        if (labStatusTimer) {
-            clearInterval(labStatusTimer);
-        }
-        const firstPoll = refreshLabStatusNow();
-        if (typeof onFirstComplete === 'function') {
-            firstPoll.then(onFirstComplete).catch(function() {});
-        }
-        labStatusTimer = setInterval(refreshLabStatusNow, 5000);
-    }
-
-    function stopLabStatusPolling() {
-        if (labStatusTimer) {
-            clearInterval(labStatusTimer);
-            labStatusTimer = null;
-        }
-    }
-
-    async function connectRemoteServer() {
-        const urlEl = document.getElementById('remote-server-url');
-        const userEl = document.getElementById('remote-username');
-        const passEl = document.getElementById('remote-password');
-
-        const serverUrl = urlEl ? String(urlEl.value || '').trim() : '';
-        const username = userEl ? String(userEl.value || '').trim() : '';
-        const password = passEl ? String(passEl.value || '') : '';
-
-        if (!serverUrl || !username || !password) {
-            setServerAuthStatus('Server URL, username, password are required.', true);
-            return;
-        }
-
-        setServerAuthStatus('Connecting to remote server...', false);
-
-        try {
-            const token = await loginRemoteServerAndGetToken(serverUrl, username, password);
-
-            remoteServerUrl = serverUrl;
-            remoteAuthToken = token;
-            remotePasswordCache = password;
-            localStorage.setItem('next_ui.remote_server_url', remoteServerUrl);
-            localStorage.setItem('next_ui.remote_username', username);
-            localStorage.setItem('next_ui.remote_token', remoteAuthToken);
-            sessionStorage.setItem('next_ui.remote_password', remotePasswordCache);
-            if (passEl) passEl.value = '';
-
-            setRemoteApiIndicator(true, 'Connected');
-            startRemoteMetricsPolling();
-            startLabStatusPolling();
-            scheduleTokenAutoRefresh();
-        } catch (e) {
-            remoteAuthToken = '';
-            setRemoteApiIndicator(false, 'Disconnected');
-            setRemoteMetrics(NaN, NaN);
-            setServerAuthStatus(`Login failed: ${e.message}`, true);
-        }
-    }
-
-    function disconnectRemoteServer() {
-        remoteAuthToken = '';
-        remotePasswordCache = '';
-        stopRemoteMetricsPolling();
-        stopLabStatusPolling();
-        stopTokenRefreshScheduler();
-        localStorage.removeItem('next_ui.remote_token');
-        sessionStorage.removeItem('next_ui.remote_password');
-        setRemoteApiIndicator(false, 'Disconnected');
-        setRemoteMetrics(NaN, NaN);
-        setLabRuntimeIndicator('idle', 'Connect to a remote server');
-        setServerAuthStatus('Disconnected from remote server.', false);
-    }
+    const RemoteSessionManager = window.createRemoteSessionManager({
+        getRemoteServerUrl: function() { return remoteServerUrl; },
+        getRemoteAuthToken: function() { return remoteAuthToken; },
+        getRemotePasswordCache: function() { return remotePasswordCache; },
+        updateRemoteSessionState: updateRemoteSessionState,
+        readStoredRemoteSession: readStoredRemoteSession,
+        persistRemoteSession: persistRemoteSession,
+        hasRemoteSession: hasRemoteSession,
+        isTokenExpired: isTokenExpired,
+        getTokenExpiresInSeconds: getTokenExpiresInSeconds,
+        getCurrentLabId: function() { return currentLabId; },
+        refreshDeploymentAccessPanel: refreshDeploymentAccessPanel,
+        refreshLabStatusNow: refreshLabStatusNow,
+        setServerAuthStatus: setServerAuthStatus,
+        setRemoteApiIndicator: setRemoteApiIndicator,
+        setRemoteMetrics: setRemoteMetrics,
+        setLabRuntimeIndicator: setLabRuntimeIndicator,
+        getRemoteMetricsTimer: function() { return remoteMetricsTimer; },
+        setRemoteMetricsTimer: function(v) { remoteMetricsTimer = v; },
+        getLabStatusTimer: function() { return labStatusTimer; },
+        setLabStatusTimer: function(v) { labStatusTimer = v; },
+        getTokenRefreshTimer: function() { return tokenRefreshTimer; },
+        setTokenRefreshTimer: function(v) { tokenRefreshTimer = v; },
+        getTokenRefreshInFlight: function() { return tokenRefreshInFlight; },
+        setTokenRefreshInFlight: function(v) { tokenRefreshInFlight = v; },
+        logWarn: Logger.warn,
+    });
+    const RenderHelpers = window.NextUIRenderHelpers || null;
+    const InteractionController = (typeof window.createInteractionController === 'function')
+        ? window.createInteractionController({})
+        : null;
 
     function switchMainTab(tabName) {
         activeMainTab = tabName === 'server' ? 'server' : 'topology';
+        AppState.ui.activeMainTab = activeMainTab;
         const topologyPanel = document.getElementById('controls-topology');
         const serverPanel = document.getElementById('controls-server');
         const topologyContainer = document.getElementById('topologyContainer');
@@ -595,41 +491,6 @@
 
         if (topologyBtn) topologyBtn.classList.toggle('active', showTopology);
         if (serverBtn) serverBtn.classList.toggle('active', showServer);
-    }
-
-    function restoreRemoteServerForm() {
-        const savedUrl = localStorage.getItem('next_ui.remote_server_url') || '';
-        const savedUser = localStorage.getItem('next_ui.remote_username') || '';
-        const savedToken = localStorage.getItem('next_ui.remote_token') || '';
-        const savedPassword = sessionStorage.getItem('next_ui.remote_password') || '';
-
-        const urlEl = document.getElementById('remote-server-url');
-        const userEl = document.getElementById('remote-username');
-        if (urlEl && savedUrl) urlEl.value = savedUrl;
-        if (userEl && savedUser) userEl.value = savedUser;
-
-        remoteServerUrl = savedUrl;
-        remoteAuthToken = savedToken;
-        remotePasswordCache = savedPassword;
-
-        if (remoteAuthToken && isTokenExpired(remoteAuthToken)) {
-            remoteAuthToken = '';
-            localStorage.removeItem('next_ui.remote_token');
-            setServerAuthStatus('Saved token expired. Please reconnect with username/password.', true);
-        }
-
-        if (remoteServerUrl && remoteAuthToken) {
-            setRemoteApiIndicator(true, 'Connected');
-            startRemoteMetricsPolling();
-            startLabStatusPolling(function() {
-                if (currentLabId) refreshDeploymentAccessPanel(currentLabId);
-            });
-            scheduleTokenAutoRefresh();
-        } else {
-            setRemoteApiIndicator(false, 'Disconnected');
-            setRemoteMetrics(NaN, NaN);
-            setLabRuntimeIndicator('idle', 'Connect to a remote server');
-        }
     }
 
     function ensureDebugOverlay() {
@@ -837,16 +698,32 @@
 
             const mappings = payload && typeof payload.mappings === 'object' ? payload.mappings : {};
             kindImageRegistry = {};
+            resetInterfaceNamingRegistry();
             Object.keys(mappings).forEach(function(kind) {
                 const item = mappings[kind];
                 if (!item || typeof item !== 'object') return;
                 const image = String(item.image || '').trim();
                 const loginName = String(item.login_name || '').trim();
                 if (!image) return;
-                kindImageRegistry[String(kind)] = {
+                const kindKey = String(kind).trim();
+                const entry = {
                     image: image,
                     login_name: loginName || String(payload.default_login_name || 'admin').trim() || 'admin',
                 };
+
+                const interfaceRule = normalizeInterfaceRulePayload(item.interface_rule);
+                if (interfaceRule) {
+                    entry.interface_rule = interfaceRule;
+                    INTERFACE_NAMING_RULES[kindKey] = interfaceRule;
+                }
+
+                const reservedList = normalizeReservedInterfacesPayload(item.reserved_interfaces);
+                if (reservedList.length > 0) {
+                    entry.reserved_interfaces = reservedList.slice();
+                    RESERVED_INTERFACES_BY_KIND[kindKey] = new Set(reservedList);
+                }
+
+                kindImageRegistry[kindKey] = entry;
             });
 
             defaultLoginName = String(payload.default_login_name || 'admin').trim() || 'admin';
@@ -859,6 +736,7 @@
             setKindImageStatus(`Failed to load server registry: ${error.message || error}`, true);
             kindImageRegistry = {};
             defaultLoginName = 'admin';
+            resetInterfaceNamingRegistry();
             return false;
         }
     }
@@ -867,9 +745,14 @@
         const body = document.getElementById('kind-image-mapping-body');
         if (!body) return;
 
+        if (RenderHelpers && typeof RenderHelpers.buildKindImageRegistryRows === 'function') {
+            body.innerHTML = RenderHelpers.buildKindImageRegistryRows(kindImageRegistry, defaultLoginName, escapeHtml);
+            return;
+        }
+
         const keys = Object.keys(kindImageRegistry).sort();
         if (keys.length === 0) {
-            body.innerHTML = '<tr><td colspan="3">No mappings registered.</td></tr>';
+            body.innerHTML = '<tr><td colspan="5">No mappings registered.</td></tr>';
             return;
         }
 
@@ -877,8 +760,112 @@
             const item = kindImageRegistry[kind] || {};
             const image = String(item.image || '').trim();
             const loginName = String(item.login_name || defaultLoginName || 'admin').trim() || 'admin';
-            return `<tr><td>${kind}</td><td>${image}</td><td>${loginName}</td></tr>`;
+            const rule = item.interface_rule && typeof item.interface_rule === 'object' ? item.interface_rule : {};
+            const prefix = String(rule.prefix || '').trim();
+            const start = Number(rule.start);
+            const max = Number(rule.max);
+            const style = String(rule.style || '').trim();
+            const ruleText = (prefix && Number.isFinite(start) && Number.isFinite(max))
+                ? `${style ? `${style} | ` : ''}${prefix}[${start}..${start + max - 1}]`
+                : '-';
+            const reserved = Array.isArray(item.reserved_interfaces)
+                ? item.reserved_interfaces.map(function(v) { return String(v || '').trim(); }).filter(Boolean)
+                : [];
+            const reservedText = reserved.length > 0 ? reserved.join(', ') : '-';
+            return `<tr><td>${escapeHtml(kind)}</td><td>${escapeHtml(image)}</td><td>${escapeHtml(loginName)}</td><td>${escapeHtml(ruleText)}</td><td>${escapeHtml(reservedText)}</td></tr>`;
         }).join('');
+    }
+
+    function getRegistryFormInterfaceRule() {
+        const styleEl = document.getElementById('registry-if-style-input');
+        const prefixEl = document.getElementById('registry-if-prefix-input');
+        const startEl = document.getElementById('registry-if-start-input');
+        const maxEl = document.getElementById('registry-if-max-input');
+
+        const style = String(styleEl && styleEl.value || '').trim();
+        const prefix = String(prefixEl && prefixEl.value || '').trim();
+        const start = Number(startEl && startEl.value);
+        const max = Number(maxEl && maxEl.value);
+        if (!prefix || !Number.isFinite(start) || !Number.isFinite(max) || max <= 0) {
+            return null;
+        }
+        const rule = {
+            prefix: prefix,
+            start: Math.trunc(start),
+            max: Math.trunc(max),
+        };
+        if (style) rule.style = style;
+        return rule;
+    }
+
+    function getRegistryFormReservedInterfaces() {
+        const reservedEl = document.getElementById('registry-if-reserved-input');
+        const text = String(reservedEl && reservedEl.value || '').trim();
+        if (!text) return [];
+        return normalizeReservedInterfacesPayload(text.split(','));
+    }
+
+    function populateRegistryFormByKind(kind) {
+        const kindKey = String(kind || '').trim();
+        const imageEl = document.getElementById('registry-image-input');
+        const loginEl = document.getElementById('registry-login-input');
+        const styleEl = document.getElementById('registry-if-style-input');
+        const prefixEl = document.getElementById('registry-if-prefix-input');
+        const startEl = document.getElementById('registry-if-start-input');
+        const maxEl = document.getElementById('registry-if-max-input');
+        const reservedEl = document.getElementById('registry-if-reserved-input');
+
+        if (imageEl) imageEl.value = getMappedImageForKind(kindKey);
+        if (loginEl) loginEl.value = getMappedLoginNameForKind(kindKey);
+
+        const rule = getInterfaceRule(kindKey);
+        if (styleEl) styleEl.value = String(rule.style || '').trim();
+        if (prefixEl) prefixEl.value = String(rule.prefix || '').trim();
+        if (startEl) startEl.value = String(Number(rule.start) || 0);
+        if (maxEl) maxEl.value = String(Number(rule.max) || 8);
+
+        const reserved = Array.from(RESERVED_INTERFACES_BY_KIND[kindKey] || []);
+        if (reservedEl) reservedEl.value = reserved.join(', ');
+
+        refreshKindYamlInterpretationPreview();
+    }
+
+    function refreshKindYamlInterpretationPreview() {
+        const outputEl = document.getElementById('registry-yaml-preview');
+        if (!outputEl) return;
+
+        const kindEl = document.getElementById('registry-kind-select');
+        const kindKey = String(kindEl && kindEl.value || '').trim() || 'linux';
+        const srcEl = document.getElementById('registry-test-src-if');
+        const tgtEl = document.getElementById('registry-test-tgt-if');
+        const srcRaw = String(srcEl && srcEl.value || '').trim() || 'eth0';
+        const tgtRaw = String(tgtEl && tgtEl.value || '').trim() || 'eth1';
+
+        const rule = getRegistryFormInterfaceRule() || getInterfaceRule(kindKey);
+        const reservedList = getRegistryFormReservedInterfaces();
+        const reservedSet = new Set(reservedList);
+
+        const srcNormalized = normalizeInterfaceNameByRule(kindKey, srcRaw, rule, reservedSet);
+        const tgtNormalized = normalizeInterfaceNameByRule(kindKey, tgtRaw, rule, reservedSet);
+
+        const style = String(rule.style || '').trim();
+        const summary = `${style ? `${style} | ` : ''}${rule.prefix}[${rule.start}..${rule.start + rule.max - 1}]`;
+        const reservedText = reservedList.length > 0 ? reservedList.join(', ') : '-';
+
+        outputEl.value = [
+            `# Kind Registry YAML interpretation preview`,
+            `kind: ${kindKey}`,
+            `rule: ${summary}`,
+            `reserved: ${reservedText}`,
+            ``,
+            `input source_if: ${srcRaw}`,
+            `input target_if: ${tgtRaw}`,
+            `normalized source_if: ${srcNormalized}`,
+            `normalized target_if: ${tgtNormalized}`,
+            ``,
+            `# Exported endpoint example`,
+            `- endpoints: ["node-a:${srcNormalized}", "node-b:${tgtNormalized}"]`
+        ].join('\n');
     }
 
     async function initKindImageRegistryUI() {
@@ -893,20 +880,27 @@
 
             if (options.includes('linux')) selectEl.value = 'linux';
             selectEl.addEventListener('change', function() {
-                const imageEl = document.getElementById('registry-image-input');
-                const loginEl = document.getElementById('registry-login-input');
-                if (imageEl) imageEl.value = getMappedImageForKind(selectEl.value);
-                if (loginEl) loginEl.value = getMappedLoginNameForKind(selectEl.value);
+                populateRegistryFormByKind(selectEl.value);
             });
         }
 
-        const imageEl = document.getElementById('registry-image-input');
-        const loginEl = document.getElementById('registry-login-input');
-        if (imageEl && selectEl) {
-            imageEl.value = getMappedImageForKind(selectEl.value);
-        }
-        if (loginEl && selectEl) {
-            loginEl.value = getMappedLoginNameForKind(selectEl.value);
+        [
+            'registry-if-prefix-input',
+            'registry-if-style-input',
+            'registry-if-start-input',
+            'registry-if-max-input',
+            'registry-if-reserved-input',
+            'registry-test-src-if',
+            'registry-test-tgt-if',
+        ].forEach(function(id) {
+            const el = document.getElementById(id);
+            if (!el) return;
+            el.addEventListener('input', refreshKindYamlInterpretationPreview);
+            el.addEventListener('change', refreshKindYamlInterpretationPreview);
+        });
+
+        if (selectEl) {
+            populateRegistryFormByKind(selectEl.value);
         }
 
         renderKindImageRegistry();
@@ -922,6 +916,8 @@
         const kind = String(selectEl.value || '').trim();
         const image = String(imageEl.value || '').trim();
         const loginName = String(loginEl.value || '').trim();
+        const interfaceRule = getRegistryFormInterfaceRule();
+        const reservedInterfaces = getRegistryFormReservedInterfaces();
         if (!kind) {
             setKindImageStatus('Kind is required.', true);
             return;
@@ -932,6 +928,10 @@
         }
         if (!loginName) {
             setKindImageStatus('Initial login_name is required.', true);
+            return;
+        }
+        if (!interfaceRule) {
+            setKindImageStatus('Interface rule requires prefix/start/max.', true);
             return;
         }
 
@@ -950,7 +950,13 @@
             const response = await fetch('/api/settings/kind-image-login', {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ kind, image, login_name: loginName }),
+                body: JSON.stringify({
+                    kind,
+                    image,
+                    login_name: loginName,
+                    interface_rule: interfaceRule,
+                    reserved_interfaces: reservedInterfaces,
+                }),
             });
             const payload = await response.json();
             if (!response.ok) {
@@ -960,9 +966,13 @@
             kindImageRegistry[kind] = {
                 image,
                 login_name: loginName,
+                interface_rule: interfaceRule,
+                reserved_interfaces: reservedInterfaces,
             };
+            applyInterfaceNamingOverridesFromRegistry();
             renderKindImageRegistry();
             refreshAddNodeKindOptions(kind);
+            populateRegistryFormByKind(kind);
             setKindImageStatus(`Saved mapping: ${kind} -> ${image} (${loginName})`, false);
         } catch (error) {
             setKindImageStatus(`Save failed: ${error.message || error}`, true);
@@ -991,12 +1001,10 @@
 
             delete kindImageRegistry[kind];
             defaultLoginName = String(payload.default_login_name || defaultLoginName || 'admin').trim() || 'admin';
+            applyInterfaceNamingOverridesFromRegistry();
             renderKindImageRegistry();
             refreshAddNodeKindOptions();
-            const imageEl = document.getElementById('registry-image-input');
-            const loginEl = document.getElementById('registry-login-input');
-            if (imageEl) imageEl.value = getMappedImageForKind(kind);
-            if (loginEl) loginEl.value = getMappedLoginNameForKind(kind);
+            populateRegistryFormByKind(kind);
             setKindImageStatus(`Removed mapping for ${kind}.`, false);
         } catch (error) {
             setKindImageStatus(`Remove failed: ${error.message || error}`, true);
@@ -1054,7 +1062,7 @@
         return assignedIp;
     }
 
-    const INTERFACE_NAMING_RULES = {
+    const DEFAULT_INTERFACE_NAMING_RULES = {
         linux:         { style: 'eth', prefix: 'eth', start: 0, max: 16 },
         host:          { style: 'eth', prefix: 'eth', start: 0, max: 16 },
         bridge:        { style: 'eth', prefix: 'eth', start: 0, max: 16 },
@@ -1083,9 +1091,78 @@
         'vr-vsrx':     { style: 'junos-ge', prefix: 'ge-0/0/', start: 0, max: 32 },
     };
 
-    const RESERVED_INTERFACES_BY_KIND = {
-        cisco_iol: new Set(['Ethernet0/0']),
+    const DEFAULT_RESERVED_INTERFACES_BY_KIND = {
+        cisco_iol: ['Ethernet0/0'],
     };
+
+    let INTERFACE_NAMING_RULES = {};
+    let RESERVED_INTERFACES_BY_KIND = {};
+
+    function normalizeInterfaceRulePayload(rule) {
+        if (!rule || typeof rule !== 'object') return null;
+        const prefix = String(rule.prefix || '').trim();
+        const start = Number(rule.start);
+        const max = Number(rule.max);
+        if (!prefix || !Number.isFinite(start) || !Number.isFinite(max) || max <= 0) {
+            return null;
+        }
+        const style = String(rule.style || '').trim();
+        const normalized = {
+            prefix: prefix,
+            start: Math.trunc(start),
+            max: Math.trunc(max),
+        };
+        if (style) normalized.style = style;
+        return normalized;
+    }
+
+    function normalizeReservedInterfacesPayload(value) {
+        if (!Array.isArray(value)) return [];
+        const out = [];
+        const seen = new Set();
+        value.forEach(function(item) {
+            const label = String(item || '').trim();
+            if (!label || seen.has(label)) return;
+            seen.add(label);
+            out.push(label);
+        });
+        return out;
+    }
+
+    function resetInterfaceNamingRegistry() {
+        INTERFACE_NAMING_RULES = {};
+        Object.keys(DEFAULT_INTERFACE_NAMING_RULES).forEach(function(kind) {
+            const rule = DEFAULT_INTERFACE_NAMING_RULES[kind] || {};
+            INTERFACE_NAMING_RULES[kind] = {
+                style: String(rule.style || '').trim(),
+                prefix: String(rule.prefix || '').trim(),
+                start: Number(rule.start) || 0,
+                max: Number(rule.max) || 8,
+            };
+        });
+
+        RESERVED_INTERFACES_BY_KIND = {};
+        Object.keys(DEFAULT_RESERVED_INTERFACES_BY_KIND).forEach(function(kind) {
+            RESERVED_INTERFACES_BY_KIND[kind] = new Set(DEFAULT_RESERVED_INTERFACES_BY_KIND[kind] || []);
+        });
+    }
+
+    function applyInterfaceNamingOverridesFromRegistry() {
+        resetInterfaceNamingRegistry();
+        Object.keys(kindImageRegistry || {}).forEach(function(kind) {
+            const item = kindImageRegistry[kind] || {};
+            const rule = normalizeInterfaceRulePayload(item.interface_rule);
+            if (rule) {
+                INTERFACE_NAMING_RULES[kind] = rule;
+            }
+            const reserved = normalizeReservedInterfacesPayload(item.reserved_interfaces);
+            if (reserved.length > 0) {
+                RESERVED_INTERFACES_BY_KIND[kind] = new Set(reserved);
+            }
+        });
+    }
+
+    resetInterfaceNamingRegistry();
 
     function getInterfaceRule(kind) {
         const key = String(kind || '').trim();
@@ -1322,10 +1399,11 @@
         return `${base}: ${String(payload)}`;
     }
 
-    function ensureClabResponseOk(response, payload, fallbackMessage) {
+    function ensureClabResponseOk(response, payload, fallbackMessage, options) {
         if (response.ok) return;
+        const affectServerStatus = !(options && options.affectServerStatus === false);
         const message = apiErrorFromResponse(response, payload, fallbackMessage);
-        if (response.status === 400) {
+        if (affectServerStatus && response.status === 400) {
             // Surface backend server-target/configuration issues clearly in Server Auth UI.
             setRemoteApiIndicator(false, 'Server Error');
             setServerAuthStatus(message, true);
@@ -1341,13 +1419,13 @@
             const data = (payload && typeof payload === 'object') ? payload : {};
             
             if (data.labs && data.labs.length > 0) {
-                currentLabId = resolveLabId(data.labs[0]);
+                updateCurrentLabId(resolveLabId(data.labs[0]));
                 if (!currentLabId) {
                     throw new Error('Lab list returned but no lab identifier was found.');
                 }
                 setLabRuntimeIndicator('running', `${currentLabId} · syncing details`);
                 if (remoteServerUrl && remoteAuthToken) {
-                    startLabStatusPolling();
+                    RemoteSessionManager.startLabStatusPolling();
                 }
                 // Fetch graph for first lab
                 const graphResponse = await clabFetch(`/labs/${encodeURIComponent(currentLabId)}/graph`);
@@ -1355,11 +1433,16 @@
                 ensureClabResponseOk(graphResponse, graphPayload, `Failed to fetch graph for ${currentLabId}`);
                 const graph = (graphPayload && typeof graphPayload === 'object') ? graphPayload : { nodes: [], links: [] };
                 const applied = await applySavedNodePositionsToGraph(graph, currentLabId);
+                refreshDeploymentAccessPanel(currentLabId).catch(function(error) {
+                    Logger.warn('Failed to auto-refresh deployment access panel:', error);
+                });
                 return ensureGraphDebugLabels(applied);
             }
 
-            currentLabId = null;
+            updateCurrentLabId(null);
             setLabRuntimeIndicator('not-running', 'No running labs');
+            setDeploymentAccessStatus('No running labs. No connectable instances.', true);
+            renderDeploymentAccessRows([]);
             const localSnapshot = readTopologySnapshotLocal();
             if (localSnapshot) {
                 ensureGraphDebugLabels(localSnapshot);
@@ -1368,7 +1451,7 @@
             
             return { nodes: [], links: [] };
         } catch (error) {
-            console.warn("API fetch failed, falling back to static topology:", error);
+            Logger.warn("API fetch failed, falling back to static topology:", error);
             const localSnapshot = readTopologySnapshotLocal();
             return localSnapshot || topologyData || { nodes: [], links: [] };
         }
@@ -1382,10 +1465,10 @@
             });
             const result = await parseApiResponse(response);
             ensureClabResponseOk(response, result, 'Deploy failed');
-            currentLabId = result.lab_id;
+            updateCurrentLabId(result.lab_id);
             return result;
         } catch (error) {
-            console.error("Deploy failed:", error);
+            Logger.error("Deploy failed:", error);
             throw error;
         }
     }
@@ -1398,10 +1481,10 @@
             });
             const result = await parseApiResponse(response);
             ensureClabResponseOk(response, result, 'Failed to deploy from YAML');
-            currentLabId = resolveLabId(result);
+            updateCurrentLabId(resolveLabId(result));
             return result;
         } catch (error) {
-            console.error("YAML deploy failed:", error);
+            Logger.error("YAML deploy failed:", error);
             throw error;
         }
     }
@@ -1427,14 +1510,21 @@
             ensureClabResponseOk(response, payload, `Failed to ${actionLabel} lab ${targetLabId}`);
 
             const removedLabId = targetLabId;
-            currentLabId = null;
+            updateCurrentLabId(null);
+            setDeploymentAccessStatus(
+                cleanup
+                    ? `${removedLabId} destroyed and cleaned. No connectable instances.`
+                    : `${removedLabId} destroyed. No connectable instances.`,
+                true
+            );
+            renderDeploymentAccessRows([]);
             await clearSavedNodePositions(removedLabId);
             await fetchTopology();
             setLabRuntimeIndicator('destroyed', cleanup ? `${removedLabId} · destroyed and cleaned` : `${removedLabId} · destroyed`);
             alert(cleanup ? `Lab destroyed and cleaned: ${removedLabId}` : `Lab destroyed: ${removedLabId}`);
         } catch (error) {
             alert(`${cleanup ? 'Destroy & Clean' : 'Destroy'} failed: ${error.message || error}`);
-            console.error("Destroy failed:", error);
+            Logger.error("Destroy failed:", error);
         }
     }
 
@@ -1680,7 +1770,7 @@
         writeSavedNodePositionsLocal(currentLabId, positions);
         const ok = await saveServerLayoutPositions(currentLabId, positions);
         if (!ok) {
-            console.warn('Server layout save failed, local fallback kept.');
+            Logger.warn('Server layout save failed, local fallback kept.');
         }
     }
 
@@ -1759,16 +1849,10 @@
             const preferred = runtimeNodes.find(n => String(n && n.name || '') === requested)
                 || runtimeNodes.find(n => String(n && n.name || '').endsWith(`-${requested}`));
             const targetNodeName = String((preferred && preferred.name) || requested).trim();
-
-            const sshResponse = await clabFetch(
-                `/labs/${encodeURIComponent(currentLabId)}/nodes/${encodeURIComponent(targetNodeName)}/ssh`,
-                {
-                    method: 'POST',
-                    body: JSON.stringify({})
-                }
-            );
-            const sshInfo = await parseApiResponse(sshResponse);
-            ensureClabResponseOk(sshResponse, sshInfo, `SSH access request failed for ${targetNodeName}`);
+            const shortNodeName = shortenRuntimeNodeName(currentLabId, targetNodeName);
+            const kind = (selectedNodeInfo && String(selectedNodeInfo.kind || '').trim()) || '';
+            const loginName = getMappedLoginNameForKind(kind) || String(defaultLoginName || 'admin').trim() || 'admin';
+            const sshInfo = await requestNodeSshAccessWithFallback(currentLabId, targetNodeName, shortNodeName, loginName);
 
             const host = sshInfo && sshInfo.host ? String(sshInfo.host) : '127.0.0.1';
             const port = sshInfo && sshInfo.port ? String(sshInfo.port) : '-';
@@ -1980,6 +2064,37 @@
         });
 
         return topo;
+    }
+
+    function getTooltipManager() {
+        if (!topo || typeof topo.tooltipManager !== 'function') return null;
+        try {
+            return topo.tooltipManager();
+        } catch (e) {
+            return null;
+        }
+    }
+
+    function closeAllTopologyTooltips() {
+        const manager = getTooltipManager();
+        if (!manager || typeof manager.closeAll !== 'function') return false;
+        try {
+            manager.closeAll();
+            return true;
+        } catch (e) {
+            return false;
+        }
+    }
+
+    function openTopologyNodeTooltip(node) {
+        const manager = getTooltipManager();
+        if (!manager || typeof manager.openNodeTooltip !== 'function' || !node) return false;
+        try {
+            manager.openNodeTooltip(node);
+            return true;
+        } catch (e) {
+            return false;
+        }
     }
 
     /**
@@ -2358,7 +2473,18 @@
     }
 
     function setupNodeClickHandler() {
-        if (!document.body.dataset.linkContextBound) {
+        if (InteractionController && typeof InteractionController.bindGlobalListenersOnce === 'function') {
+            InteractionController.bindGlobalListenersOnce({
+                handleDocumentContextMenu: handleDocumentContextMenu,
+                handleDocumentPointerDown: handleDocumentPointerDown,
+                handleDocumentPointerMove: handleDocumentPointerMove,
+                handleDocumentDoubleClick: handleDocumentDoubleClick,
+                handleDocumentClick: handleDocumentClick,
+                handleDocumentPointerUp: handleDocumentPointerUp,
+                handleDocumentKeyDown: handleDocumentKeyDown,
+                hideNodeContextMenu: hideNodeContextMenu,
+            });
+        } else if (!document.body.dataset.linkContextBound) {
             const menu = document.getElementById('nodeContextMenu');
             if (menu && !menu.dataset.bound) {
                 menu.addEventListener('mousedown', function(evt) {
@@ -2433,13 +2559,7 @@
                     pendingNodeDrag.tooltipHidden = true;
                 }
             }
-            if (topo && typeof topo.tooltipManager === 'function') {
-                try {
-                    topo.tooltipManager().closeAll();
-                } catch (e) {
-                    // Ignore errors
-                }
-            }
+            closeAllTopologyTooltips();
         });
 
         // Do not auto-open tooltip on drag end; mouseup logic decides click vs drag.
@@ -2477,9 +2597,7 @@
         contextMenuActive = true;
         blockTooltipAfterContextMenu(700);
         // Close any open NeXt tooltip before showing context menu
-        if (topo && typeof topo.tooltipManager === 'function') {
-            try { topo.tooltipManager().closeAll(); } catch(e) {}
-        }
+        closeAllTopologyTooltips();
         handleTopologyContextMenu(evt);
     }
 
@@ -2503,6 +2621,7 @@
 
         if (clearDetails) {
             selectedNodeInfo = null;
+            AppState.topology.selectedNodeInfo = null;
             updateStatusPanel();
         }
     }
@@ -2622,13 +2741,7 @@
         if (isTooltipBlocked()) return;
         showNodeDetails(node.model());
         updateStatusPanel();
-        if (topo && typeof topo.tooltipManager === 'function') {
-            try {
-                topo.tooltipManager().openNodeTooltip(node);
-            } catch (e) {
-                // Keep details panel behavior even if tooltip open fails.
-            }
-        }
+        openTopologyNodeTooltip(node);
     }
 
     function openNodeStatusWindowOnce(node, nowTs) {
@@ -2746,9 +2859,7 @@
                 // If a node is focused, background click should clear focus, not start pan mode.
                 if (activeSelectedNodeId) {
                     clearSelectedNodeVisuals(true);
-                    if (topo && typeof topo.tooltipManager === 'function') {
-                        try { topo.tooltipManager().closeAll(); } catch (e) {}
-                    }
+                    closeAllTopologyTooltips();
                     setBackgroundMoveCursor(false);
                     stopBackgroundPanTracking();
                     return;
@@ -2796,13 +2907,8 @@
             // Only treat movement as drag after a meaningful pointer delta.
             if (distanceSq >= thresholdSq && !pendingNodeDrag.tooltipHidden) {
                 pendingNodeDrag.moved = true;
-                if (topo && typeof topo.tooltipManager === 'function') {
-                    try {
-                        topo.tooltipManager().closeAll();
-                        pendingNodeDrag.tooltipHidden = true;
-                    } catch (e) {
-                        // Ignore errors
-                    }
+                if (closeAllTopologyTooltips()) {
+                    pendingNodeDrag.tooltipHidden = true;
                 }
             }
         }
@@ -2927,6 +3033,13 @@
     }
 
     function startBackgroundPanTracking() {
+        if (InteractionController && typeof InteractionController.startBackgroundPanTracking === 'function') {
+            InteractionController.startBackgroundPanTracking({
+                handleDocumentPointerMove: handleDocumentPointerMove,
+                handleDocumentPointerUp: handleDocumentPointerUp,
+            });
+            return;
+        }
         if (window.__nextuiBgPanMoveBound) return;
         window.addEventListener('mousemove', handleDocumentPointerMove, true);
         window.addEventListener('mouseup', handleDocumentPointerUp, true);
@@ -2934,6 +3047,14 @@
     }
 
     function stopBackgroundPanTracking() {
+        if (InteractionController && typeof InteractionController.stopBackgroundPanTracking === 'function') {
+            InteractionController.stopBackgroundPanTracking({
+                handleDocumentPointerMove: handleDocumentPointerMove,
+                handleDocumentPointerUp: handleDocumentPointerUp,
+                setBackgroundMoveCursor: setBackgroundMoveCursor,
+            });
+            return;
+        }
         if (!window.__nextuiBgPanMoveBound) return;
         window.removeEventListener('mousemove', handleDocumentPointerMove, true);
         window.removeEventListener('mouseup', handleDocumentPointerUp, true);
@@ -3035,22 +3156,6 @@
             }
         }
 
-        const connectBtn = document.getElementById('ctxConnectBtn');
-        if (connectBtn) {
-            const labRunning = !!currentLabId;
-            connectBtn.disabled = !nodeId || !labRunning;
-            if (!nodeId) {
-                connectBtn.textContent = 'SSH Connect (Select node first)';
-                connectBtn.title = '';
-            } else if (!labRunning) {
-                connectBtn.textContent = 'SSH Connect (Lab not running)';
-                connectBtn.title = 'Deploy the lab first to connect.';
-            } else {
-                connectBtn.textContent = `SSH Connect (${nodeId})`;
-                connectBtn.title = '';
-            }
-        }
-
         const maxX = window.innerWidth - menu.offsetWidth - INTERACTION.menuMargin;
         const maxY = window.innerHeight - menu.offsetHeight - INTERACTION.menuMargin;
         const safeX = Math.max(INTERACTION.menuMargin, Math.min(clientX, maxX));
@@ -3114,13 +3219,6 @@
             return;
         }
         startAddLinkFromNode(contextMenuNodeId);
-    }
-
-    function connectFromContextMenu() {
-        const nodeId = contextMenuNodeId;
-        hideNodeContextMenu();
-        if (!nodeId) return;
-        connectToNode(nodeId);
     }
 
     function deleteNodeFromContextMenu() {
@@ -3473,6 +3571,7 @@
         }
 
         editorMode = mode;
+        AppState.interaction.mode = editorMode;
         if (mode === 'view' && topo) {
             if (typeof topo.activateScene === 'function') {
                 try { topo.activateScene('default'); } catch (e) {}
@@ -3572,7 +3671,7 @@
         nodeInterfaceCounters.clear();
         cleanupLinkPreviewArtifacts();
         clearTopologySnapshotLocal();
-        currentLabId = null;
+        updateCurrentLabId(null);
         setEditorMode('view');
         updateStatusPanel();
     }
@@ -3977,21 +4076,61 @@
     }
 
     function normalizeInterfaceNameForYaml(kind, ifName) {
-        const kindKey = String(kind || '').trim();
+        return normalizeInterfaceNameByRule(String(kind || '').trim(), ifName, null, null);
+    }
+
+    function normalizeInterfaceNameByRule(kindKey, ifName, ruleOverride, reservedOverride) {
+        const normalizedKindKey = String(kindKey || '').trim();
         const label = String(ifName || '').trim();
+        const rule = ruleOverride || getInterfaceRule(normalizedKindKey);
 
-        // XRD requires Gi0-0-0-x style in endpoints for reliable parsing.
-        if (kindKey === 'cisco_xrd' || kindKey === 'xrd') {
-            if (!label || label === 'eth0') return 'Gi0-0-0-0';
-
-            const longMatch = label.match(/^GigabitEthernet0\/0\/0\/(\d+)$/i);
-            if (longMatch) return `Gi0-0-0-${longMatch[1]}`;
-
-            const shortMatch = label.match(/^Gi0-0-0-(\d+)$/i);
-            if (shortMatch) return `Gi0-0-0-${shortMatch[1]}`;
+        function isReservedLabel(ifLabel) {
+            if (reservedOverride instanceof Set) {
+                return reservedOverride.has(String(ifLabel || '').trim());
+            }
+            return isReservedInterface(normalizedKindKey, ifLabel);
         }
 
-        return label || 'eth0';
+        function firstNonReservedInterface(offsetHint) {
+            const maxCount = Number(rule.max) || 8;
+            const begin = Math.max(0, Number(offsetHint) || 0);
+            for (let i = begin; i < maxCount; i++) {
+                const candidate = formatInterfaceByRule(rule, i);
+                if (!isReservedLabel(candidate)) return candidate;
+            }
+            return formatInterfaceByRule(rule, 0);
+        }
+
+        // Fill missing labels with the kind's first available interface.
+        let normalized = label;
+        if (!normalized) {
+            normalized = firstNonReservedInterface(0);
+        }
+
+        // Convert legacy ethN labels to the configured naming rule.
+        const ethMatch = normalized.match(/^eth(\d+)$/i);
+        if (ethMatch) {
+            normalized = firstNonReservedInterface(Number(ethMatch[1]));
+        }
+
+        // Avoid exporting reserved interfaces as link endpoints.
+        if (isReservedLabel(normalized)) {
+            normalized = firstNonReservedInterface(0);
+        }
+
+        // XRD requires Gi0-0-0-x style in endpoints for reliable parsing.
+        if (normalizedKindKey === 'cisco_xrd' || normalizedKindKey === 'xrd') {
+            const longMatch = normalized.match(/^GigabitEthernet0\/0\/0\/(\d+)$/i);
+            if (longMatch) return `Gi0-0-0-${longMatch[1]}`;
+
+            const shortMatch = normalized.match(/^Gi0-0-0-(\d+)$/i);
+            if (shortMatch) return `Gi0-0-0-${shortMatch[1]}`;
+
+            const fallbackEthMatch = normalized.match(/^eth(\d+)$/i);
+            if (fallbackEthMatch) return `Gi0-0-0-${fallbackEthMatch[1]}`;
+        }
+
+        return normalized || firstNonReservedInterface(0);
     }
 
     /**
@@ -4138,6 +4277,11 @@
         const body = document.getElementById('deploy-access-body');
         if (!body) return;
 
+        if (RenderHelpers && typeof RenderHelpers.buildDeploymentAccessRows === 'function') {
+            body.innerHTML = RenderHelpers.buildDeploymentAccessRows(rows, escapeHtml);
+            return;
+        }
+
         const list = Array.isArray(rows) ? rows : [];
         if (list.length === 0) {
             body.innerHTML = '<tr><td colspan="2">No deployed instances.</td></tr>';
@@ -4180,6 +4324,64 @@
         return full.startsWith(prefix) ? full.slice(prefix.length) : full;
     }
 
+    function expandRuntimeNodeName(labId, nodeName) {
+        const rawLabId = String(labId || '').trim();
+        const rawNodeName = String(nodeName || '').trim();
+        if (!rawLabId || !rawNodeName) return rawNodeName;
+        const prefix = `clab-${rawLabId}-`;
+        return rawNodeName.startsWith(prefix) ? rawNodeName : `${prefix}${rawNodeName}`;
+    }
+
+    async function requestNodeSshAccessWithFallback(labId, fullNodeName, shortNodeName, loginName) {
+        const candidates = [];
+        const seen = new Set();
+        const expandedFullNodeName = expandRuntimeNodeName(labId, shortNodeName || fullNodeName);
+
+        function addCandidate(nodeName, body) {
+            const normalizedNodeName = String(nodeName || '').trim();
+            if (!normalizedNodeName) return;
+            const normalizedBody = (body && typeof body === 'object') ? body : {};
+            const key = `${normalizedNodeName}::${JSON.stringify(normalizedBody)}`;
+            if (seen.has(key)) return;
+            seen.add(key);
+            candidates.push({ nodeName: normalizedNodeName, body: normalizedBody });
+        }
+
+        if (loginName) {
+            addCandidate(fullNodeName, { sshUsername: loginName });
+            addCandidate(expandedFullNodeName, { sshUsername: loginName });
+            addCandidate(shortNodeName, { sshUsername: loginName });
+        }
+        addCandidate(fullNodeName, {});
+        addCandidate(expandedFullNodeName, {});
+        addCandidate(shortNodeName, {});
+
+        let lastError = null;
+        for (const candidate of candidates) {
+            try {
+                const sshResp = await clabFetch(
+                    `/labs/${encodeURIComponent(labId)}/nodes/${encodeURIComponent(candidate.nodeName)}/ssh`,
+                    {
+                        method: 'POST',
+                        body: JSON.stringify(candidate.body),
+                    }
+                );
+                const sshPayload = await parseApiResponse(sshResp);
+                ensureClabResponseOk(
+                    sshResp,
+                    sshPayload,
+                    `Failed to request SSH for ${candidate.nodeName}`,
+                    { affectServerStatus: false }
+                );
+                return sshPayload;
+            } catch (error) {
+                lastError = error;
+            }
+        }
+
+        throw lastError || new Error(`Failed to request SSH for ${shortNodeName || fullNodeName}`);
+    }
+
     async function refreshDeploymentAccessPanel(labIdHint) {
         const labId = String(labIdHint || currentLabId || getLabIdFromInput() || '').trim();
         if (!labId) {
@@ -4206,53 +4408,41 @@
             }
 
             const kindByName = getNodeKindByNameMap();
-            const rows = await Promise.all(runtimeNodes.map(async function(nodeRuntime) {
+            const rows = runtimeNodes.map(function(nodeRuntime) {
                 const fullNodeName = String((nodeRuntime && nodeRuntime.name) || '').trim();
                 const shortName = shortenRuntimeNodeName(labId, fullNodeName);
                 const kind = kindByName[shortName] || kindByName[fullNodeName] || '';
                 const loginName = getMappedLoginNameForKind(kind) || String(defaultLoginName || 'admin').trim() || 'admin';
 
-                try {
-                    const sshResp = await clabFetch(
-                        `/labs/${encodeURIComponent(labId)}/nodes/${encodeURIComponent(fullNodeName)}/ssh`,
-                        {
-                            method: 'POST',
-                            body: JSON.stringify({ sshUsername: loginName }),
-                        }
-                    );
-                    const sshPayload = await parseApiResponse(sshResp);
-                    ensureClabResponseOk(sshResp, sshPayload, `Failed to request SSH for ${shortName}`);
-
-                    // Use the containerlab server's IP (from remoteServerUrl) as SSH host;
-                    // the SSH port comes from the API response.
-                    let host = String((sshPayload && sshPayload.host) || '').trim();
-                    if (remoteServerUrl) {
-                        try {
-                            const serverHostname = new URL(remoteServerUrl).hostname;
-                            if (serverHostname) host = serverHostname;
-                        } catch (e) {}
-                    }
-                    const port = Number(sshPayload && sshPayload.port);
-                    const user = String((sshPayload && sshPayload.username) || loginName || 'admin').trim() || 'admin';
-
-                    if (!host || !Number.isFinite(port) || port <= 0) {
-                        return {
-                            hostname: shortName || fullNodeName,
-                            error: 'SSH host/port missing in API response',
-                        };
-                    }
-
+                const sshPort = Number(nodeRuntime && nodeRuntime.ssh_port);
+                if (!Number.isFinite(sshPort) || sshPort <= 0) {
                     return {
                         hostname: shortName || fullNodeName,
-                        uri: `ssh://${user}@${host}:${port}`,
-                    };
-                } catch (error) {
-                    return {
-                        hostname: shortName || fullNodeName,
-                        error: error.message || String(error),
+                        error: 'ssh_port missing in inspect response',
                     };
                 }
-            }));
+
+                let host = '';
+                if (remoteServerUrl) {
+                    try {
+                        host = String(new URL(remoteServerUrl).hostname || '').trim();
+                    } catch (e) {}
+                }
+                if (!host) {
+                    host = String(window.location.hostname || '').trim();
+                }
+                if (!host) {
+                    return {
+                        hostname: shortName || fullNodeName,
+                        error: 'server host missing for SSH URI',
+                    };
+                }
+
+                return {
+                    hostname: shortName || fullNodeName,
+                    uri: `ssh://${loginName}@${host}:${sshPort}`,
+                };
+            });
 
             rows.sort(function(a, b) {
                 return String(a.hostname || '').localeCompare(String(b.hostname || ''));
@@ -4268,6 +4458,7 @@
 
     function closeDeploymentAccessPanel() {
         deploymentAccessPanelRequested = false;
+        AppState.ui.deploymentAccessPanelRequested = false;
         setDeploymentAccessPanelVisible(false);
     }
 
@@ -4285,7 +4476,7 @@
             const result = await deployTopologyFromYAML(yamlContent);
             const deployedLabId = result.lab_id || result.lab_name || getLabIdFromInput() || 'success';
             await refreshCurrentLabStatus(deployedLabId);
-            startLabStatusPolling();
+            RemoteSessionManager.startLabStatusPolling();
             alert(`Lab deployed: ${deployedLabId}`);
             await fetchTopology();
             await refreshDeploymentAccessPanel(deployedLabId);
@@ -4306,6 +4497,7 @@
         const state = raw.state || 'N/A';
 
         selectedNodeInfo = { id: raw.id || name, name, ip, kind, state };
+        AppState.topology.selectedNodeInfo = selectedNodeInfo;
         updateStatusPanel();
     }
 
@@ -4414,7 +4606,6 @@
         toggleDeleteMode,
         startAddLinkFromContextMenu,
         deleteNodeFromContextMenu,
-        connectFromContextMenu,
         confirmLinkInterfaceSelection,
         cancelLinkInterfaceSelection,
         openExportYAML,
@@ -4424,11 +4615,12 @@
         closeModal,
         clearNodeSelection,
         switchMainTab,
-        connectRemoteServer,
-        disconnectRemoteServer,
-        refreshRemoteMetricsNow,
+        connectRemoteServer: function() { return RemoteSessionManager.connect(); },
+        disconnectRemoteServer: function() { return RemoteSessionManager.disconnect(); },
+        refreshRemoteMetricsNow: function() { return RemoteSessionManager.refreshMetricsNow(); },
         saveKindImageMapping,
         removeKindImageMapping,
+        refreshKindYamlInterpretationPreview,
         refreshDeploymentAccessPanel,
         closeDeploymentAccessPanel,
         toggleDeploymentAccessPanel,
@@ -4443,7 +4635,7 @@
         initTopology();
         const shell = new Shell();
         shell.start();
-        restoreRemoteServerForm();
+        RemoteSessionManager.restore();
         window.addEventListener('resize', function() {
             ensureTopologyMountedInContainer();
             syncTopologyViewportSize();
