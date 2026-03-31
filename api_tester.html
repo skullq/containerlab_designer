@@ -1,0 +1,771 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Containerlab API Tester</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+
+        body {
+            font-family: 'Segoe UI', system-ui, sans-serif;
+            background: #f1f5f9;
+            color: #1e293b;
+            min-height: 100vh;
+        }
+
+        .header {
+            background: linear-gradient(135deg, #0f172a 0%, #1e3a5f 100%);
+            color: #fff;
+            padding: 16px 24px;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+        .header h1 { font-size: 20px; font-weight: 700; letter-spacing: -0.3px; }
+        .header span { font-size: 13px; color: #94a3b8; margin-left: auto; }
+
+        .layout {
+            display: grid;
+            grid-template-columns: 340px 1fr;
+            gap: 16px;
+            padding: 16px;
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+
+        @media (max-width: 900px) {
+            .layout { grid-template-columns: 1fr; }
+        }
+
+        /* ── Panel ── */
+        .panel {
+            background: #fff;
+            border: 1px solid #e2e8f0;
+            border-radius: 10px;
+            overflow: hidden;
+        }
+        .panel-title {
+            background: #f8fafc;
+            border-bottom: 1px solid #e2e8f0;
+            padding: 10px 14px;
+            font-size: 12px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.06em;
+            color: #475569;
+        }
+        .panel-body { padding: 14px; }
+
+        /* ── Form Inputs ── */
+        label {
+            display: block;
+            font-size: 11px;
+            font-weight: 600;
+            color: #64748b;
+            margin-bottom: 4px;
+            margin-top: 10px;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+        label:first-child { margin-top: 0; }
+        input[type="text"], input[type="password"], textarea, select {
+            width: 100%;
+            padding: 8px 10px;
+            border: 1px solid #cbd5e1;
+            border-radius: 6px;
+            font-size: 13px;
+            font-family: inherit;
+            color: #1e293b;
+            background: #fff;
+            transition: border-color 0.15s;
+        }
+        input:focus, textarea:focus, select:focus {
+            outline: none;
+            border-color: #3b82f6;
+            box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.12);
+        }
+        textarea { resize: vertical; font-family: 'Menlo', 'Consolas', monospace; font-size: 12px; }
+
+        /* ── Buttons ── */
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 8px 14px;
+            border: none;
+            border-radius: 6px;
+            font-size: 13px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.15s;
+        }
+        .btn:active { transform: scale(0.97); }
+        .btn-primary { background: #2563eb; color: #fff; }
+        .btn-primary:hover { background: #1d4ed8; }
+        .btn-success { background: #16a34a; color: #fff; }
+        .btn-success:hover { background: #15803d; }
+        .btn-danger  { background: #dc2626; color: #fff; }
+        .btn-danger:hover  { background: #b91c1c; }
+        .btn-secondary { background: #e2e8f0; color: #334155; }
+        .btn-secondary:hover { background: #cbd5e1; }
+        .btn-outline { background: transparent; border: 1px solid #cbd5e1; color: #475569; }
+        .btn-outline:hover { background: #f1f5f9; }
+        .btn-sm { padding: 5px 10px; font-size: 12px; }
+        .btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+
+        /* ── Status badge ── */
+        .badge {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 999px;
+            font-size: 11px;
+            font-weight: 700;
+        }
+        .badge-ok   { background: #dcfce7; color: #15803d; }
+        .badge-warn { background: #fef9c3; color: #a16207; }
+        .badge-err  { background: #fee2e2; color: #b91c1c; }
+        .badge-info { background: #dbeafe; color: #1d4ed8; }
+
+        /* ── Token display ── */
+        #token-box {
+            font-size: 11px;
+            font-family: 'Menlo', monospace;
+            background: #f8fafc;
+            border: 1px solid #e2e8f0;
+            border-radius: 6px;
+            padding: 8px 10px;
+            word-break: break-all;
+            color: #334155;
+            min-height: 36px;
+            max-height: 80px;
+            overflow: auto;
+        }
+
+        /* ── Auth status ── */
+        #auth-status {
+            margin-top: 10px;
+            padding: 8px 10px;
+            border-radius: 6px;
+            font-size: 12px;
+            display: none;
+        }
+        #auth-status.ok  { display: block; background: #f0fdf4; border: 1px solid #bbf7d0; color: #15803d; }
+        #auth-status.err { display: block; background: #fef2f2; border: 1px solid #fecaca; color: #b91c1c; }
+
+        /* ── Endpoint row ── */
+        .endpoint-row {
+            display: grid;
+            grid-template-columns: 100px 1fr 90px;
+            gap: 6px;
+            align-items: center;
+        }
+        .endpoint-row select { padding: 8px 6px; }
+
+        /* ── Quick endpoints ── */
+        .quick-list {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 5px;
+            margin-top: 6px;
+        }
+        .quick-btn {
+            padding: 3px 9px;
+            border: 1px solid #cbd5e1;
+            border-radius: 999px;
+            font-size: 11px;
+            font-weight: 500;
+            color: #475569;
+            background: #f8fafc;
+            cursor: pointer;
+            transition: all 0.12s;
+        }
+        .quick-btn:hover { background: #dbeafe; border-color: #93c5fd; color: #1d4ed8; }
+
+        /* ── Response area ── */
+        .response-meta {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 8px;
+            flex-wrap: wrap;
+        }
+        #response-output {
+            width: 100%;
+            min-height: 360px;
+            max-height: 65vh;
+            overflow: auto;
+            background: #0f172a;
+            color: #e2e8f0;
+            border-radius: 8px;
+            padding: 14px;
+            font-size: 12.5px;
+            font-family: 'Menlo', 'Consolas', monospace;
+            line-height: 1.55;
+            white-space: pre-wrap;
+            word-break: break-word;
+        }
+
+        /* JSON syntax highlighting */
+        .jk { color: #93c5fd; }  /* key */
+        .js { color: #86efac; }  /* string value */
+        .jn { color: #fb923c; }  /* number */
+        .jb { color: #c084fc; }  /* boolean / null */
+
+        /* ── History ── */
+        #history-list {
+            max-height: 220px;
+            overflow-y: auto;
+        }
+        .history-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 6px 8px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 12px;
+            transition: background 0.1s;
+        }
+        .history-item:hover { background: #f1f5f9; }
+        .history-item .hi-method { font-weight: 700; font-size: 10px; width: 36px; text-align: center; border-radius: 4px; padding: 1px 4px; }
+        .hi-GET    { background: #dbeafe; color: #1d4ed8; }
+        .hi-POST   { background: #dcfce7; color: #15803d; }
+        .hi-PUT    { background: #fef9c3; color: #a16207; }
+        .hi-DELETE { background: #fee2e2; color: #b91c1c; }
+        .history-item .hi-path { color: #334155; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .history-item .hi-status { font-size: 11px; font-weight: 600; }
+
+        .divider { border: none; border-top: 1px solid #e2e8f0; margin: 12px 0; }
+
+        .row-btns { display: flex; gap: 6px; margin-top: 10px; }
+    </style>
+</head>
+<body>
+
+<div class="header">
+    <h1>🔬 Containerlab API Tester</h1>
+    <span id="connected-label">Not connected</span>
+</div>
+
+<div class="layout">
+
+    <!-- Left panel: Connection + Settings -->
+    <div style="display: flex; flex-direction: column; gap: 14px;">
+
+        <!-- Connection & Auth -->
+        <div class="panel">
+            <div class="panel-title">🔐 Connection</div>
+            <div class="panel-body">
+                <label>Server URL</label>
+                <input id="server-url" type="text" value="http://10.70.136.126:8080" placeholder="http://host:port">
+
+                <label>Username</label>
+                <input id="username" type="text" placeholder="admin">
+
+                <label>Password</label>
+                <input id="password" type="password" placeholder="••••••••">
+
+                <div class="row-btns">
+                    <button class="btn btn-success" onclick="doLogin()">Login</button>
+                    <button class="btn btn-secondary" onclick="doLogout()">Logout</button>
+                </div>
+
+                <div id="auth-status"></div>
+
+                <hr class="divider">
+                <label>JWT Token</label>
+                <div id="token-box">(not authenticated)</div>
+                <div class="row-btns">
+                    <button class="btn btn-outline btn-sm" onclick="copyToken()">Copy Token</button>
+                    <button class="btn btn-outline btn-sm" onclick="clearToken()">Clear</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Quick Endpoints -->
+        <div class="panel">
+            <div class="panel-title">⚡ Quick Endpoints</div>
+            <div class="panel-body">
+                <div style="font-size: 11px; color: #64748b; margin-bottom: 6px;">Click to fill the request form</div>
+                <div class="quick-list" id="quick-list"></div>
+            </div>
+        </div>
+
+        <!-- History -->
+        <div class="panel">
+            <div class="panel-title">📋 History</div>
+            <div class="panel-body" style="padding: 8px;">
+                <div id="history-list">
+                    <div style="font-size: 12px; color: #94a3b8; padding: 6px 8px;">No requests yet.</div>
+                </div>
+                <div style="margin-top: 6px; text-align: right;">
+                    <button class="btn btn-outline btn-sm" onclick="clearHistory()">Clear</button>
+                </div>
+            </div>
+        </div>
+
+    </div>
+
+    <!-- Right panel: Request + Response -->
+    <div style="display: flex; flex-direction: column; gap: 14px;">
+
+        <!-- Request -->
+        <div class="panel">
+            <div class="panel-title">📤 Request</div>
+            <div class="panel-body">
+                <label>Method & Endpoint</label>
+                <div class="endpoint-row">
+                    <select id="method">
+                        <option>GET</option>
+                        <option>POST</option>
+                        <option>PUT</option>
+                        <option>DELETE</option>
+                        <option>PATCH</option>
+                    </select>
+                    <input id="endpoint" type="text" value="/api/v1/labs" placeholder="/api/v1/...">
+                    <button class="btn btn-primary" onclick="sendRequest()" id="send-btn">Send</button>
+                </div>
+
+                <label>Request Body (JSON)</label>
+                <textarea id="body" rows="7" placeholder='{\n  "key": "value"\n}'></textarea>
+
+                <div class="row-btns">
+                    <button class="btn btn-outline btn-sm" onclick="formatBody()">Format JSON</button>
+                    <button class="btn btn-outline btn-sm" onclick="clearBody()">Clear</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Response -->
+        <div class="panel">
+            <div class="panel-title">📥 Response</div>
+            <div class="panel-body">
+                <div class="response-meta">
+                    <span id="resp-status"></span>
+                    <span id="resp-content-type" style="font-size: 11px; color: #64748b;"></span>
+                    <span style="margin-left: auto; display: flex; gap: 6px;">
+                        <button class="btn btn-outline btn-sm" onclick="copyResponse()">Copy</button>
+                        <button class="btn btn-outline btn-sm" onclick="clearResponse()">Clear</button>
+                    </span>
+                </div>
+                <div id="response-output">(response will appear here)</div>
+            </div>
+        </div>
+
+    </div>
+</div>
+
+<script>
+/* =====================================================================
+   State
+   ===================================================================== */
+let authToken = '';
+let serverUrl = '';
+let requestHistory = [];
+
+const QUICK_ENDPOINTS = [
+    { method: 'GET',    path: '/health',                    label: 'Health' },
+    { method: 'GET',    path: '/api/v1/version',            label: 'Version' },
+    { method: 'GET',    path: '/api/v1/health/metrics',     label: 'Metrics' },
+    { method: 'GET',    path: '/api/v1/labs',               label: 'List Labs' },
+    { method: 'GET',    path: '/api/v1/users',              label: 'List Users' },
+    { method: 'POST',   path: '/api/v1/labs',               label: 'Deploy Lab' },
+    { method: 'DELETE', path: '/api/v1/labs/{labName}',     label: 'Destroy Lab' },
+    { method: 'POST',   path: '/api/v1/labs/{labName}/exec', label: 'Exec' },
+    { method: 'GET',    path: '/api/v1/labs/{labName}/interfaces', label: 'Interfaces' },
+    { method: 'POST',   path: '/api/v1/labs/{labName}/save', label: 'Save Config' },
+    { method: 'GET',    path: '/api/v1/labs/{labName}/nodes/{nodeName}/logs', label: 'Node Logs' },
+    { method: 'POST',   path: '/api/v1/labs/{labName}/nodes/{nodeName}/ssh',  label: 'SSH Access' },
+    { method: 'GET',    path: '/api/v1/ssh/sessions',       label: 'SSH Sessions' },
+    { method: 'POST',   path: '/api/v1/generate',           label: 'Generate Topo' },
+    { method: 'GET',    path: '/api/v1/events',             label: 'Events' },
+];
+
+const SAMPLE_BODIES = {
+    'POST /api/v1/labs': JSON.stringify({
+        topologyContent: {
+            name: "my-lab",
+            topology: {
+                nodes: {
+                    srl1: { kind: "nokia_srlinux", image: "ghcr.io/nokia/srlinux:latest" },
+                    srl2: { kind: "nokia_srlinux", image: "ghcr.io/nokia/srlinux:latest" }
+                },
+                links: [
+                    { endpoints: ["srl1:e1-1", "srl2:e1-1"] }
+                ]
+            }
+        }
+    }, null, 2),
+    'POST /api/v1/labs/{labName}/exec': JSON.stringify({ command: "show version" }, null, 2),
+    'POST /api/v1/labs/{labName}/nodes/{nodeName}/ssh': JSON.stringify({ duration: "1h", sshUsername: "admin" }, null, 2),
+    'POST /api/v1/generate': JSON.stringify({
+        name: "clos-lab",
+        tiers: [{ count: 2, kind: "nokia_srlinux" }, { count: 4, kind: "nokia_srlinux" }],
+        deploy: false
+    }, null, 2),
+};
+
+/* =====================================================================
+   Init
+   ===================================================================== */
+document.addEventListener('DOMContentLoaded', function () {
+    // Restore saved state
+    const savedUrl   = localStorage.getItem('clab_tester_url')   || '';
+    const savedUser  = localStorage.getItem('clab_tester_user')  || '';
+    const savedToken = localStorage.getItem('clab_tester_token') || '';
+
+    if (savedUrl)   document.getElementById('server-url').value = savedUrl;
+    if (savedUser)  document.getElementById('username').value   = savedUser;
+    if (savedToken) {
+        authToken  = savedToken;
+        serverUrl  = savedUrl;
+        setTokenDisplay(savedToken);
+        setConnectedLabel(savedUrl, true);
+    }
+
+    buildQuickEndpoints();
+    loadHistory();
+});
+
+/* =====================================================================
+   Auth
+   ===================================================================== */
+async function doLogin() {
+    const url  = document.getElementById('server-url').value.trim();
+    const user = document.getElementById('username').value.trim();
+    const pass = document.getElementById('password').value;
+
+    if (!url || !user || !pass) {
+        showAuthStatus('Server URL, username and password are required.', false);
+        return;
+    }
+
+    showAuthStatus('Authenticating…', null);
+
+    try {
+        const resp = await fetch('/api/tester/login', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ serverUrl: url, username: user, password: pass }),
+        });
+        const data = await resp.json();
+
+        if (!resp.ok) {
+            const detail = data && data.detail ? data.detail : `HTTP ${resp.status}`;
+            showAuthStatus(`Login failed: ${detail}`, false);
+            return;
+        }
+
+        if (!data.token) {
+            showAuthStatus('Login succeeded but no token was returned.', false);
+            return;
+        }
+
+        authToken = data.token;
+        serverUrl = url;
+        localStorage.setItem('clab_tester_url',   url);
+        localStorage.setItem('clab_tester_user',  user);
+        localStorage.setItem('clab_tester_token', authToken);
+        document.getElementById('password').value = '';
+
+        setTokenDisplay(authToken);
+        setConnectedLabel(url, true);
+        showAuthStatus(`Authenticated as ${user}`, true);
+
+    } catch (e) {
+        showAuthStatus(`Network error: ${e.message}`, false);
+    }
+}
+
+function doLogout() {
+    authToken = '';
+    localStorage.removeItem('clab_tester_token');
+    setTokenDisplay('');
+    setConnectedLabel('', false);
+    showAuthStatus('Logged out.', null);
+}
+
+function setTokenDisplay(token) {
+    const el = document.getElementById('token-box');
+    el.textContent = token ? token : '(not authenticated)';
+    el.style.color = token ? '#334155' : '#94a3b8';
+}
+
+function setConnectedLabel(url, connected) {
+    const el = document.getElementById('connected-label');
+    if (connected && url) {
+        const host = (() => { try { return new URL(url).host; } catch(e) { return url; } })();
+        el.textContent = `✅ ${host}`;
+        el.style.color = '#86efac';
+    } else {
+        el.textContent = 'Not connected';
+        el.style.color = '#94a3b8';
+    }
+}
+
+function showAuthStatus(msg, ok) {
+    const el = document.getElementById('auth-status');
+    el.textContent = msg;
+    el.className = ok === true ? 'ok' : ok === false ? 'err' : '';
+    if (ok === null) el.style.display = 'block';
+}
+
+function copyToken() {
+    if (!authToken) return;
+    navigator.clipboard.writeText(authToken).then(() => {
+        showAuthStatus('Token copied to clipboard.', true);
+    });
+}
+
+function clearToken() {
+    doLogout();
+}
+
+/* =====================================================================
+   Request
+   ===================================================================== */
+async function sendRequest() {
+    const url      = (serverUrl || document.getElementById('server-url').value).trim();
+    const method   = document.getElementById('method').value;
+    const endpoint = document.getElementById('endpoint').value.trim();
+    const bodyRaw  = document.getElementById('body').value.trim();
+
+    if (!url) {
+        setResponseError('Server URL is not set. Please login first.');
+        return;
+    }
+    if (!endpoint || !endpoint.startsWith('/')) {
+        setResponseError('Endpoint must start with /');
+        return;
+    }
+
+    let bodyObj = null;
+    if (bodyRaw) {
+        try {
+            bodyObj = JSON.parse(bodyRaw);
+        } catch (e) {
+            setResponseError(`Invalid JSON in request body:\n${e.message}`);
+            return;
+        }
+    }
+
+    const btn = document.getElementById('send-btn');
+    btn.disabled = true;
+    btn.textContent = '…';
+
+    setResponseLoading();
+
+    try {
+        const resp = await fetch('/api/tester/request', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                serverUrl : url,
+                method    : method,
+                endpoint  : endpoint,
+                token     : authToken || '',
+                body      : bodyObj,
+            }),
+        });
+
+        const result = await resp.json();
+
+        if (!resp.ok) {
+            const detail = result && result.detail ? result.detail : `Proxy error ${resp.status}`;
+            setResponseError(typeof detail === 'string' ? detail : JSON.stringify(detail, null, 2));
+            addHistory(method, endpoint, resp.status, false);
+        } else {
+            const statusCode = result.status || resp.status;
+            const data       = result.data;
+            const ct         = result.content_type || '';
+            renderResponse(statusCode, ct, data);
+            addHistory(method, endpoint, statusCode, statusCode < 400);
+        }
+    } catch (e) {
+        setResponseError(`Network error: ${e.message}`);
+        addHistory(method, endpoint, 0, false);
+    } finally {
+        btn.disabled = false;
+        btn.textContent = 'Send';
+    }
+}
+
+/* =====================================================================
+   Response rendering
+   ===================================================================== */
+function renderResponse(statusCode, contentType, data) {
+    const statusEl = document.getElementById('resp-status');
+    const ctEl     = document.getElementById('resp-content-type');
+    const outEl    = document.getElementById('response-output');
+
+    const ok = statusCode >= 200 && statusCode < 300;
+    const cls = ok ? 'badge-ok' : (statusCode < 500 ? 'badge-warn' : 'badge-err');
+    statusEl.innerHTML = `<span class="badge ${cls}">HTTP ${statusCode}</span>`;
+    ctEl.textContent = contentType ? `(${contentType})` : '';
+
+    if (data === null || data === undefined) {
+        outEl.innerHTML = '<span style="color:#64748b;">(empty response)</span>';
+        return;
+    }
+
+    if (typeof data === 'object') {
+        outEl.innerHTML = syntaxHighlight(JSON.stringify(data, null, 2));
+    } else {
+        outEl.textContent = String(data);
+    }
+}
+
+function setResponseLoading() {
+    document.getElementById('resp-status').innerHTML = '';
+    document.getElementById('resp-content-type').textContent = '';
+    document.getElementById('response-output').innerHTML = '<span style="color:#94a3b8;">Sending request…</span>';
+}
+
+function setResponseError(msg) {
+    document.getElementById('resp-status').innerHTML = '<span class="badge badge-err">Error</span>';
+    document.getElementById('resp-content-type').textContent = '';
+    document.getElementById('response-output').textContent = msg;
+}
+
+function syntaxHighlight(json) {
+    return json
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(
+            /("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d*)?(?:[eE][+\-]?\d+)?)/g,
+            function (match) {
+                if (/^"/.test(match)) {
+                    if (/:$/.test(match)) return `<span class="jk">${match}</span>`;
+                    return `<span class="js">${match}</span>`;
+                }
+                if (/true|false|null/.test(match)) return `<span class="jb">${match}</span>`;
+                return `<span class="jn">${match}</span>`;
+            }
+        );
+}
+
+function copyResponse() {
+    const text = document.getElementById('response-output').innerText;
+    navigator.clipboard.writeText(text);
+}
+
+function clearResponse() {
+    document.getElementById('response-output').textContent = '(response will appear here)';
+    document.getElementById('resp-status').innerHTML = '';
+    document.getElementById('resp-content-type').textContent = '';
+}
+
+/* =====================================================================
+   Body helpers
+   ===================================================================== */
+function formatBody() {
+    const el = document.getElementById('body');
+    try {
+        el.value = JSON.stringify(JSON.parse(el.value), null, 2);
+    } catch (e) {
+        // not JSON – leave as-is
+    }
+}
+
+function clearBody() {
+    document.getElementById('body').value = '';
+}
+
+/* =====================================================================
+   Quick endpoints
+   ===================================================================== */
+function buildQuickEndpoints() {
+    const container = document.getElementById('quick-list');
+    container.innerHTML = '';
+    QUICK_ENDPOINTS.forEach(function (ep) {
+        const btn = document.createElement('button');
+        btn.className = 'quick-btn';
+        btn.textContent = ep.label;
+        btn.onclick = function () {
+            document.getElementById('method').value   = ep.method;
+            document.getElementById('endpoint').value = ep.path;
+            const key = `${ep.method} ${ep.path}`;
+            if (SAMPLE_BODIES[key]) {
+                document.getElementById('body').value = SAMPLE_BODIES[key];
+            } else if (['GET', 'DELETE'].includes(ep.method)) {
+                document.getElementById('body').value = '';
+            }
+        };
+        container.appendChild(btn);
+    });
+}
+
+/* =====================================================================
+   History
+   ===================================================================== */
+function addHistory(method, endpoint, status, ok) {
+    requestHistory.unshift({ method, endpoint, status, ok, ts: Date.now() });
+    if (requestHistory.length > 30) requestHistory.pop();
+    saveHistory();
+    renderHistory();
+}
+
+function renderHistory() {
+    const el = document.getElementById('history-list');
+    if (requestHistory.length === 0) {
+        el.innerHTML = '<div style="font-size:12px;color:#94a3b8;padding:6px 8px;">No requests yet.</div>';
+        return;
+    }
+
+    el.innerHTML = requestHistory.map(function (item, i) {
+        const statusCls = item.ok ? 'badge-ok' : 'badge-err';
+        const methodCls = `hi-${item.method}`;
+        return `<div class="history-item" onclick="restoreHistory(${i})">
+            <span class="hi-method ${methodCls}">${item.method}</span>
+            <span class="hi-path">${escapeHtml(item.endpoint)}</span>
+            <span class="hi-status badge ${statusCls}">${item.status || '?'}</span>
+        </div>`;
+    }).join('');
+}
+
+function restoreHistory(index) {
+    const item = requestHistory[index];
+    if (!item) return;
+    document.getElementById('method').value   = item.method;
+    document.getElementById('endpoint').value = item.endpoint;
+}
+
+function clearHistory() {
+    requestHistory = [];
+    saveHistory();
+    renderHistory();
+}
+
+function saveHistory() {
+    try { localStorage.setItem('clab_tester_history', JSON.stringify(requestHistory)); } catch (e) {}
+}
+
+function loadHistory() {
+    try {
+        const raw = localStorage.getItem('clab_tester_history');
+        if (raw) requestHistory = JSON.parse(raw);
+        renderHistory();
+    } catch (e) { requestHistory = []; }
+}
+
+/* =====================================================================
+   Utility
+   ===================================================================== */
+function escapeHtml(str) {
+    return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+}
+
+/* keyboard shortcut: Ctrl+Enter sends request */
+document.addEventListener('keydown', function (e) {
+    if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+        e.preventDefault();
+        sendRequest();
+    }
+});
+</script>
+
+</body>
+</html>

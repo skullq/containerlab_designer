@@ -2,7 +2,7 @@
 <html>
     <head>
         <meta charset="utf-8">
-        <title>next_ui - Containerlab Topology Designer</title>
+        <title>NeXt_UI - Containerlab Topology Designer</title>
         <link rel="stylesheet" href="next_sources/css/next.css">
         <link rel="stylesheet" href="styles_main_page.css">
         <script src="next_sources/js/next.js"></script>
@@ -40,17 +40,47 @@
             }
             #lab-status-bar {
                 display: flex;
-                flex-direction: column;
-                align-items: flex-end;
-                gap: 4px;
+                align-items: stretch;
+                gap: 10px;
                 font-size: 12px;
                 color: #374151;
                 margin-left: 16px;
+                flex-wrap: wrap;
             }
             .lab-status-item {
-                display: flex;
+                display: grid;
+                grid-template-columns: 14px minmax(160px, 1fr);
+                gap: 2px 10px;
                 align-items: center;
-                gap: 4px;
+                padding: 8px 12px;
+                border: 1px solid #dbe3ee;
+                border-radius: 10px;
+                background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
+                min-width: 220px;
+            }
+            .lab-status-item .lab-dot {
+                grid-row: 1 / span 3;
+                justify-self: center;
+            }
+            .status-title {
+                font-size: 10px;
+                font-weight: 700;
+                text-transform: uppercase;
+                letter-spacing: 0.08em;
+                color: #64748b;
+                line-height: 1.1;
+            }
+            .status-value {
+                font-weight: 600;
+                color: #0f172a;
+                line-height: 1.2;
+            }
+            .status-meta {
+                color: #64748b;
+                line-height: 1.2;
+                white-space: nowrap;
+                overflow: hidden;
+                text-overflow: ellipsis;
             }
             .lab-dot {
                 display: inline-block;
@@ -61,6 +91,46 @@
             }
             .dot-green { background: #22c55e; box-shadow: 0 0 5px #16a34a88; }
             .dot-red   { background: #ef4444; }
+            .dot-amber { background: #f59e0b; }
+            @media (max-width: 920px) {
+                .header {
+                    align-items: flex-start;
+                    flex-direction: column;
+                    gap: 10px;
+                }
+                #lab-status-bar {
+                    width: 100%;
+                    margin-left: 0;
+                }
+                .lab-status-item {
+                    flex: 1 1 260px;
+                }
+            }
+            .tab-strip {
+                display: flex;
+                gap: 8px;
+                padding: 8px 10px 0;
+                background: rgba(243,245,247,0.95);
+            }
+            .tab-btn {
+                background: #cbd5e1;
+                color: #1f2937;
+                border: 1px solid #94a3b8;
+                border-bottom: none;
+                border-radius: 6px 6px 0 0;
+                padding: 7px 12px;
+                font-size: 12px;
+                font-weight: 600;
+            }
+            .tab-btn:hover {
+                background: #b8c5d6;
+                color: #111827;
+            }
+            .tab-btn.active {
+                background: #ffffff;
+                color: #0f172a;
+                box-shadow: inset 0 -2px 0 #ffffff;
+            }
             .controls {
                 display: flex;
                 gap: 8px;
@@ -73,6 +143,9 @@
                 background: rgba(243,245,247,0.95);
                 backdrop-filter: blur(6px);
                 border-bottom: 1px solid #e5e7eb;
+            }
+            .controls.hidden {
+                display: none;
             }
             .control-section {
                 border: 1px solid #ddd;
@@ -90,6 +163,60 @@
                 text-transform: uppercase;
                 color: #64748b;
                 letter-spacing: 0.04em;
+            }
+            /* Keep Topology controls in deterministic visual order even when wrapped */
+            #controls-topology .control-topology-editor { order: 1; }
+            #controls-topology .control-lab-control { order: 2; }
+            #controls-topology .control-node-control { order: 3; }
+            .server-auth-input {
+                padding: 6px 8px;
+                border: 1px solid #cbd5e1;
+                border-radius: 4px;
+                font-size: 12px;
+                min-width: 180px;
+            }
+            .dev-input {
+                padding: 6px 8px;
+                border: 1px solid #cbd5e1;
+                border-radius: 4px;
+                font-size: 12px;
+                min-width: 170px;
+            }
+            .mapping-table-wrap {
+                width: 100%;
+                max-height: 180px;
+                overflow: auto;
+                border: 1px solid #e5e7eb;
+                border-radius: 4px;
+                background: #fff;
+            }
+            .mapping-table {
+                width: 100%;
+                border-collapse: collapse;
+                font-size: 12px;
+            }
+            .mapping-table th,
+            .mapping-table td {
+                border-bottom: 1px solid #eef2f7;
+                padding: 6px 8px;
+                text-align: left;
+                white-space: nowrap;
+            }
+            .mapping-table th {
+                font-size: 11px;
+                text-transform: uppercase;
+                color: #64748b;
+                background: #f8fafc;
+            }
+            #kind-image-status {
+                width: 100%;
+                color: #64748b;
+                font-size: 12px;
+            }
+            #server-auth-status {
+                color: #64748b;
+                font-size: 12px;
+                margin-left: 6px;
             }
             button {
                 padding: 6px 10px;
@@ -312,8 +439,8 @@
             /* Slightly smaller YAML modal */
             #yamlModal .modal-box {
                 min-width: 310px;
-                max-width: 500px;
-                width: 82vw;
+                max-width: 560px;
+                width: 86vw;
                 padding: 16px 18px;
             }
 
@@ -399,34 +526,33 @@
     <body>
         <div class="header">
             <div class="header-left">
-                <h1>next_ui - Containerlab Topology Designer</h1>
-                <p>Click node: details &amp; highlight &nbsp;|&nbsp; Right-click: Add Link · Delete · SSH Connect</p>
+                <h1>NeXt_UI - Containerlab Topology Designer</h1>
             </div>
             <div id="lab-status-bar">
                 <span class="lab-status-item">
-                    Lab Deployed
-                    <span id="lab-deployed-dot" class="lab-dot dot-red" title="Not deployed"></span>
+                    <span id="remote-api-dot" class="lab-dot dot-red" title="Not connected"></span>
+                    <span class="status-title">API</span>
+                    <span id="remote-api-state" class="status-value">Disconnected</span>
+                    <span id="remote-api-meta" class="status-meta">No server</span>
                 </span>
                 <span class="lab-status-item">
-                    API ON
-                    <span id="api-on-dot" class="lab-dot dot-red" title="Static mode"></span>
+                    <span id="lab-runtime-dot" class="lab-dot dot-amber" title="No lab selected"></span>
+                    <span class="status-title">Lab</span>
+                    <span id="lab-runtime-state" class="status-value">Idle</span>
+                    <span id="lab-runtime-meta" class="status-meta">Connect to a remote server</span>
                 </span>
             </div>
         </div>
 
-        <div class="controls">
-            <!-- Lab Lifecycle Controls -->
-            <div class="control-section">
-                <h4>Lab Control</h4>
-                <button onclick="nextUI.deployCurrentTopology()">
-                    Deploy
-                </button>
-                <button onclick="nextUI.destroyLab()" class="danger">Destroy</button>
-                <button onclick="nextUI.fetchTopology()" class="secondary">Refresh</button>
-            </div>
+        <div class="tab-strip">
+            <button id="tab-btn-topology" class="tab-btn active" onclick="nextUI.switchMainTab('topology')">Topology</button>
+            <button id="tab-btn-server" class="tab-btn" onclick="nextUI.switchMainTab('server')">Server Auth</button>
+            <button id="tab-btn-develop" class="tab-btn" onclick="nextUI.switchMainTab('develop')">Develop</button>
+        </div>
 
+        <div id="controls-topology" class="controls">
             <!-- Topology Editor -->
-            <div class="control-section">
+            <div class="control-section control-topology-editor">
                 <h4>Topology Editor</h4>
                 <input id="lab-name-input" type="text" value="my-lab"
                     style="padding:6px 8px;border:1px solid #ccc;border-radius:4px;font-size:13px;width:90px;"
@@ -436,26 +562,72 @@
                 <button onclick="nextUI.openExportYAML()" class="secondary">YAML</button>
             </div>
 
+            <!-- Lab Lifecycle Controls -->
+            <div class="control-section control-lab-control">
+                <h4>Lab Control</h4>
+                <button onclick="nextUI.deployCurrentTopology()">
+                    Deploy
+                </button>
+                <button onclick="nextUI.destroyLab()" class="danger">Destroy</button>
+                <button onclick="nextUI.destroyLabAndClean()" class="danger">Destroy &amp; Clean</button>
+            </div>
+
             <!-- Node Control -->
-            <div class="control-section">
+            <div class="control-section control-node-control">
                 <h4>Node Control</h4>
                 <button onclick="nextUI.runSelectedNodeCommand()" class="secondary">
                     Command
                 </button>
             </div>
+        </div>
 
-            <!-- Developer -->
-            <div class="control-section">
+        <div id="controls-server" class="controls hidden">
+            <div class="control-section" style="width:100%; justify-content:flex-start;">
+                <h4>Remote Server Login</h4>
+                <input id="remote-server-url" class="server-auth-input" type="text" value="http://10.70.136.126:8080" placeholder="Server URL">
+                <input id="remote-username" class="server-auth-input" type="text" value="" placeholder="Username">
+                <input id="remote-password" class="server-auth-input" type="password" value="" placeholder="Password">
+                <button class="success" onclick="nextUI.connectRemoteServer()">Connect</button>
+                <button class="secondary" onclick="nextUI.disconnectRemoteServer()">Disconnect</button>
+                <button class="secondary" onclick="nextUI.refreshRemoteMetricsNow()">Refresh Now</button>
+                <span id="server-auth-status">Enter server credentials and connect.</span>
+            </div>
+        </div>
+
+        <div id="controls-develop" class="controls hidden">
+            <div class="control-section" style="width:100%; justify-content:flex-start;">
                 <h4>Developer</h4>
                 <button onclick="nextUI.toggleDebugOverlay()" class="secondary">
                     Toggle Debug HitTest
                 </button>
+                <button onclick="window.open('/api_tester.html', '_blank')" class="secondary">
+                    API Tester
+                </button>
                 <button onclick="window.open('/docs', '_blank')" class="secondary">
                     API Docs
                 </button>
-                <button onclick="window.open('/health', '_blank')" class="secondary">
-                    Health
-                </button>
+            </div>
+
+            <div class="control-section" style="width:100%; align-items:flex-start;">
+                <h4>Kind → Image Registry</h4>
+                <select id="registry-kind-select" class="dev-input"></select>
+                <input id="registry-image-input" class="dev-input" type="text" placeholder="e.g. ghcr.io/nokia/srlinux:24.10.1">
+                <button class="success" onclick="nextUI.saveKindImageMapping()">Save/Update</button>
+                <button class="secondary" onclick="nextUI.removeKindImageMapping()">Remove</button>
+                <div id="kind-image-status">Register image names from docker images output for each kind.</div>
+                <div class="mapping-table-wrap">
+                    <table class="mapping-table">
+                        <thead>
+                            <tr>
+                                <th>Kind</th>
+                                <th>Image</th>
+                            </tr>
+                        </thead>
+                        <tbody id="kind-image-mapping-body">
+                            <tr><td colspan="2">No mappings registered.</td></tr>
+                        </tbody>
+                    </table>
+                </div>
             </div>
         </div>
 
@@ -492,17 +664,13 @@
                 </div>
                 <div class="form-row">
                     <label>Kind</label>
-                    <select id="nodeKind" onchange="nextUI.onKindChange()">
-                        <option value="linux">linux</option>
-                        <option value="nokia_srlinux">nokia_srlinux (SR Linux)</option>
-                        <option value="vr-xrv">vr-xrv (Cisco XRv)</option>
-                        <option value="ceos">ceos (Arista cEOS)</option>
-                        <option value="bridge">bridge</option>
-                    </select>
+                    <select id="nodeKind" onchange="nextUI.onKindChange()"></select>
+                    <small style="margin-top:4px;color:#64748b;font-size:11px;">Only kinds registered in Develop &gt; Kind → Image Registry are available.</small>
                 </div>
                 <div class="form-row">
                     <label>Image</label>
-                    <input id="nodeImage" type="text" placeholder="ubuntu:20.04">
+                    <select id="nodeImage"></select>
+                    <small style="margin-top:4px;color:#64748b;font-size:11px;">Image is auto-selected from registered mapping.</small>
                 </div>
                 <div class="form-row">
                     <label>Icon</label>

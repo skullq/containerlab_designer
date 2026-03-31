@@ -120,6 +120,7 @@ class RuntimeNodeInfo(BaseModel):
     name: str
     container_id: str
     state: str  # running, stopped, failed
+    status: Optional[str] = None  # human-readable status, e.g. "Up 18 hours"
     image: str
     mgmt_ip: Optional[str] = None
     ssh_port: Optional[int] = None

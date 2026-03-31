@@ -13,7 +13,6 @@
     // Global state
     let currentTopology = null;
     let currentLabId = null;
-    let apiMode = true;  // true = use API, false = use static topology.js
     let topo = null;
     let selectedNodeInfo = null;
     let linkDraft = null;
@@ -23,8 +22,17 @@
     let lastMousePoint = null;
     let lastNodeClickTs = 0;
     let lastImmediateFocusTs = 0;
+    let contextMenuActive = false;
+    let tooltipBlockedUntilTs = 0;
+    let lastNodeOpenRequest = { nodeId: null, ts: 0 };
+    let lastNodeClickRecord = { nodeId: null, ts: 0 };
+    let lastNodePrimaryDown = { nodeId: null, ts: 0 };
     let lastLinkPick = { nodeId: null, ts: 0 };
     let activeSelectedNodeId = null;
+    let pendingBackgroundClick = null;
+    let backgroundPanState = null;
+    let pendingNodeDrag = null;
+    let backgroundMoveCursorActive = false;
     let linkPreviewMousemoveBound = false;
     let surfaceRectCache = {
         el: null,
@@ -39,16 +47,500 @@
     const mgmtIpByNode = new Map();
     const MGMT_IP_PREFIX = '172.31.255';
     const LAYOUT_STORAGE_PREFIX = 'next_ui.layout.';
+    const KIND_IMAGE_REGISTRY_KEY = 'next_ui.kind_image_registry';
+    const TOPOLOGY_SNAPSHOT_KEY = 'next_ui.topology_snapshot.v1';
+    const DEBUG_SHOW_NODE_COORD_LABEL = true;
     let mgmtHostCounter = 10;
     let topologyApp = null;
+    let remoteServerUrl = '';
+    let remoteAuthToken = '';
+    let remoteMetricsTimer = null;
+    let labStatusTimer = null;
+    let lastRemoteCpuPercent = NaN;
+    let lastRemoteMemPercent = NaN;
+    let lastRemoteApiConnected = false;
+    let lastRemoteApiLabel = 'Disconnected';
+    let kindImageRegistry = {};
+    const LINK_PREVIEW_LAYER_ID = 'nextui-link-preview-layer';
+    const LINK_PREVIEW_LINE_ID = 'nextui-link-preview-line';
     const INTERACTION = {
         contextPickRadius: 80,
         linkPickRadius: 68,
         focusPickRadius: 56,
+        doubleClickPickRadius: 30,
+        doubleClickMs: 340,
         dedupeMs: 120,
         suppressClickNodeMs: 200,  // Increased from 140ms for slower systems
+        backgroundDragStartPx: 7,
+        nodeDragHideTooltipPx: 12,
         menuMargin: 8,
     };
+
+    let pendingRestoreCoordMap = null;
+
+    function isTooltipBlocked(nowTs) {
+        const now = Number.isFinite(nowTs) ? nowTs : Date.now();
+        return contextMenuActive || now < tooltipBlockedUntilTs;
+    }
+
+    function blockTooltipAfterContextMenu(durationMs) {
+        const ms = Number.isFinite(durationMs) ? durationMs : 650;
+        tooltipBlockedUntilTs = Date.now() + Math.max(180, ms);
+    }
+
+    function buildCoordMapFromNodes(nodes) {
+        const map = {};
+        (nodes || []).forEach(function(node) {
+            if (!node) return;
+            const id = String(node.id || node.name || '');
+            if (!id) return;
+            const x = Number(node.x);
+            const y = Number(node.y);
+            map[id] = {
+                x: Number.isFinite(x) ? Math.round(x) : 0,
+                y: Number.isFinite(y) ? Math.round(y) : 0,
+            };
+        });
+        return map;
+    }
+
+    function ensureGraphDebugLabels(graph) {
+        if (!graph || !Array.isArray(graph.nodes)) return graph;
+        graph.nodes.forEach(function(node) {
+            if (!node) return;
+            const name = String(node.name || node.id || 'node');
+            const x = Number(node.x);
+            const y = Number(node.y);
+            node.debugLabel = formatNodeCoordLabel(name, x, y);
+        });
+        return graph;
+    }
+
+    function setServerAuthStatus(message, isError) {
+        const el = document.getElementById('server-auth-status');
+        if (!el) return;
+        el.textContent = message || '';
+        el.style.color = isError ? '#b91c1c' : '#64748b';
+    }
+
+    function simplifyServerLabel(url) {
+        const raw = String(url || '').trim();
+        if (!raw) return 'No server';
+        try {
+            const parsed = new URL(raw);
+            return parsed.host || raw;
+        } catch (e) {
+            return raw.replace(/^https?:\/\//, '').replace(/\/$/, '');
+        }
+    }
+
+    function formatStatusLabel(value) {
+        const raw = String(value || '').trim();
+        if (!raw) return '-';
+        return raw
+            .split(/[-_\s]+/)
+            .filter(Boolean)
+            .map(part => part.charAt(0).toUpperCase() + part.slice(1))
+            .join(' ');
+    }
+
+    function renderRemoteApiSummary() {
+        const dot = document.getElementById('remote-api-dot');
+        const stateEl = document.getElementById('remote-api-state');
+        const metaEl = document.getElementById('remote-api-meta');
+
+        if (dot) {
+            dot.className = lastRemoteApiConnected ? 'lab-dot dot-green' : 'lab-dot dot-red';
+            dot.title = lastRemoteApiConnected ? 'Remote API connected' : 'Remote API disconnected';
+        }
+        if (stateEl) {
+            stateEl.textContent = lastRemoteApiLabel || (lastRemoteApiConnected ? 'Connected' : 'Disconnected');
+        }
+        if (metaEl) {
+            const parts = [simplifyServerLabel(remoteServerUrl)];
+            if (Number.isFinite(lastRemoteCpuPercent) || Number.isFinite(lastRemoteMemPercent)) {
+                parts.push(`CPU ${Number.isFinite(lastRemoteCpuPercent) ? lastRemoteCpuPercent.toFixed(1) : '-'}%`);
+                parts.push(`MEM ${Number.isFinite(lastRemoteMemPercent) ? lastRemoteMemPercent.toFixed(1) : '-'}%`);
+            }
+            metaEl.textContent = parts.join(' · ');
+        }
+    }
+
+    function setRemoteApiIndicator(connected, label) {
+        lastRemoteApiConnected = !!connected;
+        lastRemoteApiLabel = label || (connected ? 'Connected' : 'Disconnected');
+        renderRemoteApiSummary();
+    }
+
+    function setRemoteMetrics(cpuPercent, memPercent) {
+        lastRemoteCpuPercent = cpuPercent;
+        lastRemoteMemPercent = memPercent;
+        renderRemoteApiSummary();
+    }
+
+    function setLabRuntimeIndicator(state, detail) {
+        const dot = document.getElementById('lab-runtime-dot');
+        const stateEl = document.getElementById('lab-runtime-state');
+        const metaEl = document.getElementById('lab-runtime-meta');
+        const label = String(state || '').toLowerCase();
+
+        let cls = 'dot-amber';
+        if (label === 'running' || label === 'healthy' || label === 'ok') cls = 'dot-green';
+        else if (label === 'failed' || label === 'error' || label === 'not-found' || label === 'destroyed' || label === 'not-running') cls = 'dot-red';
+
+        if (dot) {
+            dot.className = `lab-dot ${cls}`;
+            dot.title = detail || state || 'Lab status';
+        }
+        if (stateEl) {
+            stateEl.textContent = formatStatusLabel(state || 'idle');
+        }
+        if (metaEl) {
+            metaEl.textContent = detail || 'No active lab';
+        }
+    }
+
+    function getLabIdFromInput() {
+        const el = document.getElementById('lab-name-input');
+        const value = el ? String(el.value || '').trim() : '';
+        return value || null;
+    }
+
+    function summarizeLabState(runtime) {
+        const rawStatus = String((runtime && runtime.status) || '').trim().toLowerCase();
+        const nodes = Array.isArray(runtime && runtime.nodes_runtime) ? runtime.nodes_runtime : [];
+        const runningNodes = nodes.filter(n => String((n && n.state) || '').toLowerCase() === 'running').length;
+        const totalNodes = nodes.length;
+
+        const uptimeCandidates = nodes
+            .map(n => String((n && n.status) || '').trim())
+            .filter(Boolean)
+            .filter(text => /^up\s+/i.test(text));
+        const uptimeSummary = uptimeCandidates.length > 0 ? uptimeCandidates[0] : '';
+
+        const status = rawStatus || (totalNodes > 0 && runningNodes === totalNodes ? 'running' : (totalNodes > 0 ? 'deploying' : 'unknown'));
+        const labName = (runtime && (runtime.lab_name || runtime.lab_id)) || currentLabId || '-';
+        const nodeSummary = totalNodes > 0 ? `running ${runningNodes}/${totalNodes}` : 'No nodes reported';
+        const detailParts = [labName, nodeSummary];
+        if (uptimeSummary) detailParts.push(uptimeSummary);
+        const detail = detailParts.join(' · ');
+        return { status, detail };
+    }
+
+    function resolveLabId(candidate) {
+        if (!candidate || typeof candidate !== 'object') return null;
+        const raw = candidate.lab_id || candidate.id || candidate.lab_name || candidate.name || candidate.lab;
+        const value = String(raw || '').trim();
+        return value || null;
+    }
+
+    async function refreshCurrentLabStatus(labIdHint) {
+        const targetLabId = String(labIdHint || currentLabId || getLabIdFromInput() || '').trim();
+        if (!targetLabId) {
+            setLabRuntimeIndicator('idle', 'No active lab');
+            return null;
+        }
+
+        try {
+            const response = await clabFetch(`/labs/${encodeURIComponent(targetLabId)}`);
+            const payload = await parseApiResponse(response);
+            if (response.status === 404) {
+                setLabRuntimeIndicator('not-found', `${targetLabId} · not running or not found`);
+                return null;
+            }
+
+            ensureClabResponseOk(response, payload, `Failed to inspect lab ${targetLabId}`);
+            const runtime = (payload && typeof payload === 'object') ? payload : {};
+            currentLabId = runtime.lab_id || runtime.lab_name || targetLabId;
+            const summary = summarizeLabState(runtime);
+            setLabRuntimeIndicator(summary.status, summary.detail);
+            return runtime;
+        } catch (error) {
+            setLabRuntimeIndicator('error', `Status check failed · ${error.message || error}`);
+            throw error;
+        }
+    }
+
+    async function refreshLabStatusNow() {
+        if (!remoteServerUrl || !remoteAuthToken) {
+            setLabRuntimeIndicator('idle', 'Connect to a remote server');
+            return null;
+        }
+
+        const preferredLabId = String(currentLabId || getLabIdFromInput() || '').trim();
+        if (preferredLabId) {
+            try {
+                return await refreshCurrentLabStatus(preferredLabId);
+            } catch (error) {
+                return null;
+            }
+        }
+
+        try {
+            const response = await clabFetch('/labs');
+            const payload = await parseApiResponse(response);
+            ensureClabResponseOk(response, payload, 'Failed to fetch labs');
+            const data = (payload && typeof payload === 'object') ? payload : {};
+            const labs = Array.isArray(data.labs) ? data.labs : [];
+
+            if (labs.length === 0) {
+                currentLabId = null;
+                setLabRuntimeIndicator('not-running', 'No running labs');
+                return null;
+            }
+
+            currentLabId = resolveLabId(labs[0]);
+            if (!currentLabId) {
+                setLabRuntimeIndicator('unknown', 'Lab discovered but identifier missing');
+                return null;
+            }
+
+            return await refreshCurrentLabStatus(currentLabId);
+        } catch (error) {
+            setLabRuntimeIndicator('error', `Status check failed · ${error.message || error}`);
+            return null;
+        }
+    }
+
+    function parseJwtExpiryEpoch(token) {
+        const raw = String(token || '').trim();
+        if (!raw) return null;
+        const parts = raw.split('.');
+        if (parts.length < 2) return null;
+        try {
+            const payloadBase64 = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+            const padded = payloadBase64 + '='.repeat((4 - payloadBase64.length % 4) % 4);
+            const payloadJson = atob(padded);
+            const payload = JSON.parse(payloadJson);
+            const exp = Number(payload && payload.exp);
+            return Number.isFinite(exp) ? exp : null;
+        } catch (e) {
+            return null;
+        }
+    }
+
+    function isTokenExpired(token) {
+        const exp = parseJwtExpiryEpoch(token);
+        if (!exp) return false;
+        const nowEpoch = Math.floor(Date.now() / 1000);
+        return nowEpoch >= exp;
+    }
+
+    function summarizeRemoteErrorData(data) {
+        if (data == null) return '';
+        if (typeof data === 'string') return data;
+        if (typeof data !== 'object') return String(data);
+        if (data.detail) return typeof data.detail === 'string' ? data.detail : JSON.stringify(data.detail);
+        if (data.message) return String(data.message);
+        return JSON.stringify(data);
+    }
+
+    async function proxyRemoteRequest(method, endpoint, body) {
+        const response = await fetch('/api/tester/request', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                serverUrl: remoteServerUrl,
+                method,
+                endpoint,
+                token: remoteAuthToken,
+                body: body || null,
+            }),
+        });
+        const payload = await response.json();
+        if (!response.ok) {
+            const detail = payload && payload.detail ? payload.detail : 'Proxy request failed';
+            throw new Error(typeof detail === 'string' ? detail : JSON.stringify(detail));
+        }
+        return payload;
+    }
+
+    async function refreshRemoteMetricsNow() {
+        if (!remoteServerUrl || !remoteAuthToken) {
+            setRemoteApiIndicator(false, 'Disconnected');
+            setRemoteMetrics(NaN, NaN);
+            return;
+        }
+
+        if (isTokenExpired(remoteAuthToken)) {
+            disconnectRemoteServer();
+            setServerAuthStatus('Saved token expired. Please reconnect with username/password.', true);
+            return;
+        }
+
+        try {
+            const result = await proxyRemoteRequest('GET', '/api/v1/health/metrics');
+            const status = Number(result && result.status);
+            const data = result ? result.data : null;
+            const metrics = data && data.metrics ? data.metrics : null;
+            const cpu = metrics && metrics.cpu ? Number(metrics.cpu.usagePercent) : NaN;
+            const mem = metrics && metrics.mem ? Number(metrics.mem.usagePercent) : NaN;
+
+            if (status >= 200 && status < 300) {
+                setRemoteApiIndicator(true, `Connected (${status})`);
+                setRemoteMetrics(cpu, mem);
+                setServerAuthStatus('Connected. Polling metrics every 5 seconds.', false);
+            } else if (status === 401 || status === 403) {
+                const errorText = summarizeRemoteErrorData(data);
+                disconnectRemoteServer();
+                setServerAuthStatus(`Remote auth failed (${status})${errorText ? `: ${errorText}` : ''}. Please reconnect.`, true);
+            } else {
+                const errorText = summarizeRemoteErrorData(data);
+                setRemoteApiIndicator(false, `Error (${status})`);
+                setRemoteMetrics(NaN, NaN);
+                setServerAuthStatus(`Metrics request failed (${status})${errorText ? `: ${errorText}` : ''}.`, true);
+            }
+        } catch (e) {
+            setRemoteApiIndicator(false, 'Disconnected');
+            setRemoteMetrics(NaN, NaN);
+            setServerAuthStatus(`Metrics error: ${e.message}`, true);
+        }
+    }
+
+    function startRemoteMetricsPolling() {
+        if (remoteMetricsTimer) {
+            clearInterval(remoteMetricsTimer);
+        }
+        refreshRemoteMetricsNow();
+        remoteMetricsTimer = setInterval(refreshRemoteMetricsNow, 5000);
+    }
+
+    function stopRemoteMetricsPolling() {
+        if (remoteMetricsTimer) {
+            clearInterval(remoteMetricsTimer);
+            remoteMetricsTimer = null;
+        }
+    }
+
+    function startLabStatusPolling() {
+        if (labStatusTimer) {
+            clearInterval(labStatusTimer);
+        }
+        refreshLabStatusNow();
+        labStatusTimer = setInterval(refreshLabStatusNow, 5000);
+    }
+
+    function stopLabStatusPolling() {
+        if (labStatusTimer) {
+            clearInterval(labStatusTimer);
+            labStatusTimer = null;
+        }
+    }
+
+    async function connectRemoteServer() {
+        const urlEl = document.getElementById('remote-server-url');
+        const userEl = document.getElementById('remote-username');
+        const passEl = document.getElementById('remote-password');
+
+        const serverUrl = urlEl ? String(urlEl.value || '').trim() : '';
+        const username = userEl ? String(userEl.value || '').trim() : '';
+        const password = passEl ? String(passEl.value || '') : '';
+
+        if (!serverUrl || !username || !password) {
+            setServerAuthStatus('Server URL, username, password are required.', true);
+            return;
+        }
+
+        setServerAuthStatus('Connecting to remote server...', false);
+
+        try {
+            const response = await fetch('/api/tester/login', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    serverUrl,
+                    username,
+                    password,
+                }),
+            });
+            const data = await response.json();
+            if (!response.ok) {
+                const detail = data && data.detail ? data.detail : 'Login failed';
+                throw new Error(typeof detail === 'string' ? detail : JSON.stringify(detail));
+            }
+            if (!data.token) {
+                throw new Error('Login succeeded but token is missing.');
+            }
+
+            remoteServerUrl = serverUrl;
+            remoteAuthToken = data.token;
+            localStorage.setItem('next_ui.remote_server_url', remoteServerUrl);
+            localStorage.setItem('next_ui.remote_username', username);
+            localStorage.setItem('next_ui.remote_token', remoteAuthToken);
+            if (passEl) passEl.value = '';
+
+            setRemoteApiIndicator(true, 'Connected');
+            startRemoteMetricsPolling();
+            startLabStatusPolling();
+        } catch (e) {
+            remoteAuthToken = '';
+            setRemoteApiIndicator(false, 'Disconnected');
+            setRemoteMetrics(NaN, NaN);
+            setServerAuthStatus(`Login failed: ${e.message}`, true);
+        }
+    }
+
+    function disconnectRemoteServer() {
+        remoteAuthToken = '';
+        stopRemoteMetricsPolling();
+        stopLabStatusPolling();
+        localStorage.removeItem('next_ui.remote_token');
+        setRemoteApiIndicator(false, 'Disconnected');
+        setRemoteMetrics(NaN, NaN);
+        setLabRuntimeIndicator('idle', 'Connect to a remote server');
+        setServerAuthStatus('Disconnected from remote server.', false);
+    }
+
+    function switchMainTab(tabName) {
+        const topologyPanel = document.getElementById('controls-topology');
+        const serverPanel = document.getElementById('controls-server');
+        const developPanel = document.getElementById('controls-develop');
+        const topologyBtn = document.getElementById('tab-btn-topology');
+        const serverBtn = document.getElementById('tab-btn-server');
+        const developBtn = document.getElementById('tab-btn-develop');
+
+        const showTopology = tabName === 'topology';
+        const showServer = tabName === 'server';
+        const showDevelop = tabName === 'develop';
+
+        if (topologyPanel) topologyPanel.classList.toggle('hidden', !showTopology);
+        if (serverPanel) serverPanel.classList.toggle('hidden', !showServer);
+        if (developPanel) developPanel.classList.toggle('hidden', !showDevelop);
+
+        if (topologyBtn) topologyBtn.classList.toggle('active', showTopology);
+        if (serverBtn) serverBtn.classList.toggle('active', showServer);
+        if (developBtn) developBtn.classList.toggle('active', showDevelop);
+    }
+
+    function restoreRemoteServerForm() {
+        const savedUrl = localStorage.getItem('next_ui.remote_server_url') || '';
+        const savedUser = localStorage.getItem('next_ui.remote_username') || '';
+        const savedToken = localStorage.getItem('next_ui.remote_token') || '';
+
+        const urlEl = document.getElementById('remote-server-url');
+        const userEl = document.getElementById('remote-username');
+        if (urlEl && savedUrl) urlEl.value = savedUrl;
+        if (userEl && savedUser) userEl.value = savedUser;
+
+        remoteServerUrl = savedUrl;
+        remoteAuthToken = savedToken;
+
+        if (remoteAuthToken && isTokenExpired(remoteAuthToken)) {
+            remoteAuthToken = '';
+            localStorage.removeItem('next_ui.remote_token');
+            setServerAuthStatus('Saved token expired. Please reconnect with username/password.', true);
+        }
+
+        if (remoteServerUrl && remoteAuthToken) {
+            setRemoteApiIndicator(true, 'Connected');
+            startRemoteMetricsPolling();
+            startLabStatusPolling();
+        } else {
+            setRemoteApiIndicator(false, 'Disconnected');
+            setRemoteMetrics(NaN, NaN);
+            setLabRuntimeIndicator('idle', 'Connect to a remote server');
+        }
+    }
 
     function ensureDebugOverlay() {
         if (debugOverlayEl) return debugOverlayEl;
@@ -153,10 +645,179 @@
     const KIND_DEFAULTS = {
         'linux':          { image: 'ubuntu:20.04',                    icon: 'host'   },
         'nokia_srlinux':  { image: 'ghcr.io/nokia/srlinux:latest',    icon: 'router' },
+        'cisco_xrd':      { image: '',                                 icon: 'router' },
+        'cisco_iol':      { image: '',                                 icon: 'router' },
+        'k8s-kind':       { image: '',                                 icon: 'cloud'  },
         'vr-xrv':         { image: 'vrnetlab/vr-xrv:7.8.1',           icon: 'router' },
         'ceos':           { image: 'ceos:4.31.0F',                    icon: 'switch' },
         'bridge':         { image: '',                                 icon: 'switch' },
     };
+    const CLAB_SUPPORTED_KINDS = [
+        'linux', 'bridge', 'host', 'ovs-bridge',
+        'cisco_xrd', 'cisco_iol',
+        'k8s-kind',
+        'nokia_srlinux', 'vr-sros', 'sros',
+        'vr-xrv', 'xrv9k', 'c8000v', 'csr1000v', 'cat9kv', 'nxos',
+        'ceos', 'veos',
+        'vr-vmx', 'vr-vqfx', 'vr-vsrx',
+        'sonic-vs', 'vyos', 'fortinet_fortigate'
+    ];
+
+    function getMappedImageForKind(kind) {
+        const k = String(kind || '').trim();
+        if (!k) return '';
+        if (kindImageRegistry[k]) return kindImageRegistry[k];
+        return (KIND_DEFAULTS[k] && KIND_DEFAULTS[k].image) ? KIND_DEFAULTS[k].image : '';
+    }
+
+    function getRegisteredKindEntries() {
+        return Object.keys(kindImageRegistry)
+            .map(function(kind) {
+                return { kind, image: String(kindImageRegistry[kind] || '').trim() };
+            })
+            .filter(function(item) {
+                return !!item.kind && !!item.image;
+            })
+            .sort(function(a, b) {
+                return a.kind.localeCompare(b.kind);
+            });
+    }
+
+    function getRegisteredImageForKind(kind) {
+        const k = String(kind || '').trim();
+        if (!k) return '';
+        return String(kindImageRegistry[k] || '').trim();
+    }
+
+    function refreshAddNodeKindOptions(preferredKind) {
+        const kindSelect = document.getElementById('nodeKind');
+        const imageSelect = document.getElementById('nodeImage');
+        if (!kindSelect || !imageSelect) return false;
+
+        const entries = getRegisteredKindEntries();
+        if (entries.length === 0) {
+            kindSelect.innerHTML = '<option value="">No registered kinds</option>';
+            imageSelect.innerHTML = '<option value="">No registered images</option>';
+            return false;
+        }
+
+        kindSelect.innerHTML = entries.map(function(entry) {
+            return `<option value="${entry.kind}">${entry.kind}</option>`;
+        }).join('');
+
+        const targetKind = preferredKind && entries.some(function(e) { return e.kind === preferredKind; })
+            ? preferredKind
+            : entries[0].kind;
+        kindSelect.value = targetKind;
+        onKindChange();
+        return true;
+    }
+
+    function setKindImageStatus(message, isError) {
+        const el = document.getElementById('kind-image-status');
+        if (!el) return;
+        el.textContent = message || '';
+        el.style.color = isError ? '#b91c1c' : '#64748b';
+    }
+
+    function loadKindImageRegistry() {
+        try {
+            const raw = localStorage.getItem(KIND_IMAGE_REGISTRY_KEY);
+            const parsed = raw ? JSON.parse(raw) : {};
+            kindImageRegistry = parsed && typeof parsed === 'object' ? parsed : {};
+        } catch (e) {
+            kindImageRegistry = {};
+        }
+    }
+
+    function saveKindImageRegistry() {
+        localStorage.setItem(KIND_IMAGE_REGISTRY_KEY, JSON.stringify(kindImageRegistry));
+    }
+
+    function renderKindImageRegistry() {
+        const body = document.getElementById('kind-image-mapping-body');
+        if (!body) return;
+
+        const keys = Object.keys(kindImageRegistry).sort();
+        if (keys.length === 0) {
+            body.innerHTML = '<tr><td colspan="2">No mappings registered.</td></tr>';
+            return;
+        }
+
+        body.innerHTML = keys.map(function(kind) {
+            const image = kindImageRegistry[kind] || '';
+            return `<tr><td>${kind}</td><td>${image}</td></tr>`;
+        }).join('');
+    }
+
+    function initKindImageRegistryUI() {
+        loadKindImageRegistry();
+
+        const selectEl = document.getElementById('registry-kind-select');
+        if (selectEl) {
+            const options = Array.from(new Set(CLAB_SUPPORTED_KINDS.concat(Object.keys(KIND_DEFAULTS)))).sort();
+            selectEl.innerHTML = options.map(function(kind) {
+                return `<option value="${kind}">${kind}</option>`;
+            }).join('');
+
+            if (options.includes('linux')) selectEl.value = 'linux';
+            selectEl.addEventListener('change', function() {
+                const imageEl = document.getElementById('registry-image-input');
+                if (imageEl) imageEl.value = getMappedImageForKind(selectEl.value);
+            });
+        }
+
+        const imageEl = document.getElementById('registry-image-input');
+        if (imageEl && selectEl) {
+            imageEl.value = getMappedImageForKind(selectEl.value);
+        }
+
+        renderKindImageRegistry();
+        refreshAddNodeKindOptions('linux');
+    }
+
+    function saveKindImageMapping() {
+        const selectEl = document.getElementById('registry-kind-select');
+        const imageEl = document.getElementById('registry-image-input');
+        if (!selectEl || !imageEl) return;
+
+        const kind = String(selectEl.value || '').trim();
+        const image = String(imageEl.value || '').trim();
+        if (!kind) {
+            setKindImageStatus('Kind is required.', true);
+            return;
+        }
+        if (!image) {
+            setKindImageStatus('Image is required.', true);
+            return;
+        }
+
+        kindImageRegistry[kind] = image;
+        saveKindImageRegistry();
+        renderKindImageRegistry();
+        refreshAddNodeKindOptions(kind);
+        setKindImageStatus(`Saved mapping: ${kind} -> ${image}`, false);
+    }
+
+    function removeKindImageMapping() {
+        const selectEl = document.getElementById('registry-kind-select');
+        if (!selectEl) return;
+        const kind = String(selectEl.value || '').trim();
+        if (!kind) return;
+
+        if (!kindImageRegistry[kind]) {
+            setKindImageStatus(`No saved mapping found for ${kind}.`, true);
+            return;
+        }
+
+        delete kindImageRegistry[kind];
+        saveKindImageRegistry();
+        renderKindImageRegistry();
+        refreshAddNodeKindOptions();
+        const imageEl = document.getElementById('registry-image-input');
+        if (imageEl) imageEl.value = getMappedImageForKind(kind);
+        setKindImageStatus(`Removed mapping for ${kind}.`, false);
+    }
 
     function isValidIpv4(ip) {
         if (!ip || typeof ip !== 'string') return false;
@@ -209,14 +870,62 @@
         return assignedIp;
     }
 
+    const INTERFACE_NAMING_RULES = {
+        linux:         { style: 'eth', prefix: 'eth', start: 0, max: 16 },
+        host:          { style: 'eth', prefix: 'eth', start: 0, max: 16 },
+        bridge:        { style: 'eth', prefix: 'eth', start: 0, max: 16 },
+        'ovs-bridge':  { style: 'eth', prefix: 'eth', start: 0, max: 16 },
+        'k8s-kind':    { style: 'eth', prefix: 'eth', start: 0, max: 16 },
+
+        nokia_srlinux: { style: 'slot-port', prefix: 'ethernet-1/', start: 1, max: 32 },
+        sros:          { style: 'slot-port', prefix: 'ethernet-1/', start: 1, max: 32 },
+        'vr-sros':     { style: 'slot-port', prefix: 'ethernet-1/', start: 1, max: 32 },
+
+        ceos:          { style: 'eth-cap', prefix: 'Ethernet', start: 1, max: 32 },
+        veos:          { style: 'eth-cap', prefix: 'Ethernet', start: 1, max: 32 },
+        nxos:          { style: 'mod-port', prefix: 'Ethernet1/', start: 1, max: 48 },
+
+        'vr-xrv':      { style: 'xr-gi', prefix: 'GigabitEthernet0/0/0/', start: 0, max: 16 },
+        xrv9k:         { style: 'xr-gi', prefix: 'GigabitEthernet0/0/0/', start: 0, max: 16 },
+        cisco_xrd:     { style: 'xr-gi', prefix: 'GigabitEthernet0/0/0/', start: 0, max: 16 },
+
+        cisco_iol:     { style: 'iol-eth', prefix: 'Ethernet0/', start: 1, max: 8 },
+        csr1000v:      { style: 'gi-flat', prefix: 'GigabitEthernet', start: 2, max: 8 },
+        c8000v:        { style: 'gi-flat', prefix: 'GigabitEthernet', start: 2, max: 8 },
+        cat9kv:        { style: 'gi-mod-port', prefix: 'GigabitEthernet0/0/', start: 0, max: 8 },
+
+        'vr-vmx':      { style: 'junos-ge', prefix: 'ge-0/0/', start: 0, max: 32 },
+        'vr-vqfx':     { style: 'junos-ge', prefix: 'ge-0/0/', start: 0, max: 32 },
+        'vr-vsrx':     { style: 'junos-ge', prefix: 'ge-0/0/', start: 0, max: 32 },
+    };
+
+    const RESERVED_INTERFACES_BY_KIND = {
+        cisco_iol: new Set(['Ethernet0/0']),
+    };
+
+    function getInterfaceRule(kind) {
+        const key = String(kind || '').trim();
+        return INTERFACE_NAMING_RULES[key] || INTERFACE_NAMING_RULES.linux;
+    }
+
+    function isReservedInterface(kind, ifName) {
+        const key = String(kind || '').trim();
+        const label = String(ifName || '').trim();
+        if (!key || !label) return false;
+        const reserved = RESERVED_INTERFACES_BY_KIND[key];
+        return !!(reserved && reserved.has(label));
+    }
+
+    function formatInterfaceByRule(rule, offset) {
+        const start = Number(rule.start) || 0;
+        const n = start + Math.max(0, Number(offset) || 0);
+        return `${rule.prefix}${n}`;
+    }
+
     function peekNextInterface(nodeId, kind) {
         const count = nodeInterfaceCounters.get(nodeId) || 0;
-        switch (kind) {
-            case 'nokia_srlinux': return `ethernet-1/${count + 1}`;
-            case 'vr-xrv':        return `GigabitEthernet0/0/0/${count}`;
-            case 'ceos':          return `Ethernet${count + 1}`;
-            default:              return `eth${count}`;
-        }
+        const rule = getInterfaceRule(kind);
+        return formatInterfaceByRule(rule, count);
     }
 
     // Generate and consume next available interface name for a node
@@ -229,16 +938,15 @@
 
     function getInterfaceCandidates(kind, suggested) {
         const candidates = [];
-        if (suggested) candidates.push(suggested);
+        if (suggested && !isReservedInterface(kind, suggested)) candidates.push(suggested);
 
-        if (kind === 'nokia_srlinux') {
-            for (let i = 1; i <= 8; i++) candidates.push(`ethernet-1/${i}`);
-        } else if (kind === 'vr-xrv') {
-            for (let i = 0; i <= 7; i++) candidates.push(`GigabitEthernet0/0/0/${i}`);
-        } else if (kind === 'ceos') {
-            for (let i = 1; i <= 8; i++) candidates.push(`Ethernet${i}`);
-        } else {
-            for (let i = 0; i <= 7; i++) candidates.push(`eth${i}`);
+        const rule = getInterfaceRule(kind);
+        const maxCount = Number(rule.max) || 8;
+        for (let i = 0; i < maxCount; i++) {
+            const ifName = formatInterfaceByRule(rule, i);
+            if (!isReservedInterface(kind, ifName)) {
+                candidates.push(ifName);
+            }
         }
 
         return Array.from(new Set(candidates));
@@ -392,38 +1100,105 @@
     /**
      * API Helper Functions
      */
+    function clabFetch(path, options) {
+        const headers = Object.assign({
+            'Content-Type': 'application/json',
+        }, options && options.headers);
+        if (remoteServerUrl) headers['X-Clab-Server'] = remoteServerUrl;
+        if (remoteAuthToken) headers['X-Clab-Token'] = remoteAuthToken;
+        return fetch(CLAB_API + path, Object.assign({}, options, { headers }));
+    }
+
+    async function parseApiResponse(response) {
+        const contentType = (response.headers.get('content-type') || '').toLowerCase();
+        const raw = await response.text();
+
+        if (!raw) return null;
+        if (contentType.includes('application/json')) {
+            try {
+                return JSON.parse(raw);
+            } catch (e) {
+                return raw;
+            }
+        }
+        return raw;
+    }
+
+    function apiErrorFromResponse(response, payload, fallbackMessage) {
+        const base = fallbackMessage || `HTTP ${response.status}`;
+        if (!payload) return `${base} (status=${response.status})`;
+        if (typeof payload === 'string') return `${base}: ${payload}`;
+        if (typeof payload === 'object') {
+            const detail = payload.detail || payload.message || payload.error;
+            if (detail) {
+                return `${base}: ${typeof detail === 'string' ? detail : JSON.stringify(detail)}`;
+            }
+            return `${base}: ${JSON.stringify(payload)}`;
+        }
+        return `${base}: ${String(payload)}`;
+    }
+
+    function ensureClabResponseOk(response, payload, fallbackMessage) {
+        if (response.ok) return;
+        const message = apiErrorFromResponse(response, payload, fallbackMessage);
+        if (response.status === 400) {
+            // Surface backend server-target/configuration issues clearly in Server Auth UI.
+            setRemoteApiIndicator(false, 'Server Error');
+            setServerAuthStatus(message, true);
+        }
+        throw new Error(message);
+    }
+
     async function fetchTopology() {
         try {
-            const response = await fetch(CLAB_API + "/labs");
-            const data = await response.json();
+            const response = await clabFetch("/labs");
+            const payload = await parseApiResponse(response);
+            ensureClabResponseOk(response, payload, 'Failed to fetch labs');
+            const data = (payload && typeof payload === 'object') ? payload : {};
             
             if (data.labs && data.labs.length > 0) {
-                currentLabId = data.labs[0].id;
-                updateLabStatusIndicators();
+                currentLabId = resolveLabId(data.labs[0]);
+                if (!currentLabId) {
+                    throw new Error('Lab list returned but no lab identifier was found.');
+                }
+                setLabRuntimeIndicator('running', `${currentLabId} · syncing details`);
+                if (remoteServerUrl && remoteAuthToken) {
+                    startLabStatusPolling();
+                }
                 // Fetch graph for first lab
-                const graphResponse = await fetch(CLAB_API + `/labs/${currentLabId}/graph`);
-                const graph = await graphResponse.json();
-                return await applySavedNodePositionsToGraph(graph, currentLabId);
+                const graphResponse = await clabFetch(`/labs/${encodeURIComponent(currentLabId)}/graph`);
+                const graphPayload = await parseApiResponse(graphResponse);
+                ensureClabResponseOk(graphResponse, graphPayload, `Failed to fetch graph for ${currentLabId}`);
+                const graph = (graphPayload && typeof graphPayload === 'object') ? graphPayload : { nodes: [], links: [] };
+                const applied = await applySavedNodePositionsToGraph(graph, currentLabId);
+                return ensureGraphDebugLabels(applied);
+            }
+
+            currentLabId = null;
+            setLabRuntimeIndicator('not-running', 'No running labs');
+            const localSnapshot = readTopologySnapshotLocal();
+            if (localSnapshot) {
+                ensureGraphDebugLabels(localSnapshot);
+                return localSnapshot;
             }
             
             return { nodes: [], links: [] };
         } catch (error) {
             console.warn("API fetch failed, falling back to static topology:", error);
-            apiMode = false;
-            return topologyData || { nodes: [], links: [] };
+            const localSnapshot = readTopologySnapshotLocal();
+            return localSnapshot || topologyData || { nodes: [], links: [] };
         }
     }
 
     async function deployTopology(topologySpec) {
         try {
-            const response = await fetch(CLAB_API + "/labs", {
+            const response = await clabFetch("/labs", {
                 method: "POST",
-                headers: { "Content-Type": "application/json" },
                 body: JSON.stringify(topologySpec)
             });
-            const result = await response.json();
+            const result = await parseApiResponse(response);
+            ensureClabResponseOk(response, result, 'Deploy failed');
             currentLabId = result.lab_id;
-            updateLabStatusIndicators();
             return result;
         } catch (error) {
             console.error("Deploy failed:", error);
@@ -431,17 +1206,56 @@
         }
     }
 
-    async function destroyLab() {
-        if (!currentLabId) return;
+    async function deployTopologyFromYAML(yamlContent) {
         try {
-            const removedLabId = currentLabId;
-            await fetch(CLAB_API + `/labs/${currentLabId}`, { method: "DELETE" });
-            currentLabId = null;
-            updateLabStatusIndicators();
-            await clearSavedNodePositions(removedLabId);
+            const response = await clabFetch("/labs/deploy-yaml", {
+                method: "POST",
+                body: JSON.stringify({ yaml: yamlContent })
+            });
+            const result = await parseApiResponse(response);
+            ensureClabResponseOk(response, result, 'Failed to deploy from YAML');
+            currentLabId = resolveLabId(result);
+            return result;
         } catch (error) {
+            console.error("YAML deploy failed:", error);
+            throw error;
+        }
+    }
+
+    async function destroyLab(options) {
+        const cleanup = !!(options && options.cleanup);
+        const targetLabId = String(currentLabId || getLabIdFromInput() || '').trim();
+        if (!targetLabId) {
+            alert('No target lab selected. Enter lab name or deploy/select a lab first.');
+            return;
+        }
+
+        const confirmMessage = cleanup
+            ? `Destroy and clean lab '${targetLabId}' on remote server? This also removes lab artifacts.`
+            : `Destroy lab '${targetLabId}' on remote server?`;
+        if (!confirm(confirmMessage)) return;
+
+        try {
+            const query = cleanup ? '?cleanup=true' : '';
+            const response = await clabFetch(`/labs/${encodeURIComponent(targetLabId)}${query}`, { method: "DELETE" });
+            const payload = await parseApiResponse(response);
+            const actionLabel = cleanup ? 'destroy and clean' : 'destroy';
+            ensureClabResponseOk(response, payload, `Failed to ${actionLabel} lab ${targetLabId}`);
+
+            const removedLabId = targetLabId;
+            currentLabId = null;
+            await clearSavedNodePositions(removedLabId);
+            await fetchTopology();
+            setLabRuntimeIndicator('destroyed', cleanup ? `${removedLabId} · destroyed and cleaned` : `${removedLabId} · destroyed`);
+            alert(cleanup ? `Lab destroyed and cleaned: ${removedLabId}` : `Lab destroyed: ${removedLabId}`);
+        } catch (error) {
+            alert(`${cleanup ? 'Destroy & Clean' : 'Destroy'} failed: ${error.message || error}`);
             console.error("Destroy failed:", error);
         }
+    }
+
+    function destroyLabAndClean() {
+        return destroyLab({ cleanup: true });
     }
 
     function getLayoutStorageKey(labId) {
@@ -489,10 +1303,115 @@
         }
     }
 
+    function collectTopologySnapshot() {
+        const tf = getStageTransform();
+        const size = getTopologyContainerSize();
+        const snapshot = {
+            savedAt: Date.now(),
+            viewport: {
+                scale: Number.isFinite(tf.scale) ? tf.scale : 1,
+                tx: Number.isFinite(tf.tx) ? tf.tx : 0,
+                ty: Number.isFinite(tf.ty) ? tf.ty : 0,
+                containerWidth: Number.isFinite(size.width) ? size.width : 0,
+                containerHeight: Number.isFinite(size.height) ? size.height : 0,
+                windowWidth: Number.isFinite(window.innerWidth) ? window.innerWidth : 0,
+                windowHeight: Number.isFinite(window.innerHeight) ? window.innerHeight : 0,
+            },
+            graph: {
+                nodes: [],
+                links: [],
+            },
+        };
+
+        if (!topo) return snapshot;
+
+        topo.eachNode(function(node) {
+            if (!node) return;
+            const model = node.model ? node.model() : null;
+            const raw = (model && model.getData && model.getData()) || {};
+            const pos = getStableNodeModelPosition(node);
+            const nodeId = String(raw.id || raw.name || node.id());
+            if (!nodeId) return;
+
+            snapshot.graph.nodes.push({
+                id: nodeId,
+                name: raw.name || nodeId,
+                label: raw.label || raw.name || nodeId,
+                kind: raw.kind || 'linux',
+                image: raw.image || '',
+                icon: raw.icon || raw.iconType || 'host',
+                iconType: raw.iconType || raw.icon || 'host',
+                primaryIP: raw.primaryIP || getOrAssignMgmtIp(nodeId),
+                x: Number.isFinite(pos && pos.x) ? pos.x : 0,
+                y: Number.isFinite(pos && pos.y) ? pos.y : 0,
+            });
+        });
+
+        topo.eachLink(function(link) {
+            if (!link) return;
+            const model = link.model ? link.model() : null;
+            const raw = (model && model.getData && model.getData()) || {};
+            const source = model && model.sourceID ? model.sourceID() : raw.source;
+            const target = model && model.targetID ? model.targetID() : raw.target;
+            if (!source || !target) return;
+
+            snapshot.graph.links.push({
+                id: String(raw.id || link.id() || `${source}-${target}`),
+                source: String(source),
+                target: String(target),
+                srcIfName: raw.srcIfName || 'eth0',
+                tgtIfName: raw.tgtIfName || 'eth0',
+                srcDevice: raw.srcDevice || String(source),
+                tgtDevice: raw.tgtDevice || String(target),
+            });
+        });
+
+        return snapshot;
+    }
+
+    function saveTopologySnapshotLocal() {
+        try {
+            const payload = collectTopologySnapshot();
+            localStorage.setItem(TOPOLOGY_SNAPSHOT_KEY, JSON.stringify(payload));
+        } catch (e) {
+            console.warn('Failed to save topology snapshot:', e);
+        }
+    }
+
+    function readTopologySnapshotLocal() {
+        try {
+            const raw = localStorage.getItem(TOPOLOGY_SNAPSHOT_KEY);
+            if (!raw) return null;
+            const parsed = JSON.parse(raw);
+            const graph = parsed && parsed.graph ? parsed.graph : null;
+            if (!graph || !Array.isArray(graph.nodes) || !Array.isArray(graph.links)) return null;
+            ensureGraphDebugLabels(graph);
+            const viewport = parsed && parsed.viewport && typeof parsed.viewport === 'object'
+                ? parsed.viewport
+                : null;
+            return {
+                nodes: graph.nodes.filter(Boolean),
+                links: graph.links.filter(Boolean),
+                __viewport: viewport,
+            };
+        } catch (e) {
+            console.warn('Failed to read topology snapshot:', e);
+            return null;
+        }
+    }
+
+    function clearTopologySnapshotLocal() {
+        try {
+            localStorage.removeItem(TOPOLOGY_SNAPSHOT_KEY);
+        } catch (e) {
+            console.warn('Failed to clear topology snapshot:', e);
+        }
+    }
+
     async function fetchServerLayoutPositions(labId) {
         if (!labId) return null;
         try {
-            const res = await fetch(CLAB_API + `/labs/${encodeURIComponent(labId)}/layout`);
+            const res = await clabFetch(`/labs/${encodeURIComponent(labId)}/layout`);
             if (!res.ok) return null;
             const payload = await res.json();
             if (!payload || typeof payload !== 'object') return null;
@@ -506,9 +1425,8 @@
     async function saveServerLayoutPositions(labId, positions) {
         if (!labId) return false;
         try {
-            const res = await fetch(CLAB_API + `/labs/${encodeURIComponent(labId)}/layout`, {
+            const res = await clabFetch(`/labs/${encodeURIComponent(labId)}/layout`, {
                 method: 'PUT',
-                headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ positions: positions || {} }),
             });
             return res.ok;
@@ -520,7 +1438,7 @@
     async function deleteServerLayoutPositions(labId) {
         if (!labId) return false;
         try {
-            const res = await fetch(CLAB_API + `/labs/${encodeURIComponent(labId)}/layout`, {
+            const res = await clabFetch(`/labs/${encodeURIComponent(labId)}/layout`, {
                 method: 'DELETE',
             });
             return res.ok;
@@ -555,8 +1473,8 @@
         if (!topo) return positions;
 
         topo.eachNode(function(node) {
-            if (!node || !node.position) return;
-            const pos = node.position();
+            if (!node) return;
+            const pos = getStableNodeModelPosition(node);
             if (!pos || !Number.isFinite(pos.x) || !Number.isFinite(pos.y)) return;
             const raw = (node.model && node.model().getData && node.model().getData()) || {};
             const nodeId = String(raw.id || raw.name || node.id());
@@ -568,6 +1486,9 @@
     }
 
     async function saveNodePositionsNow() {
+        syncNodeModelPositionFieldsFromView();
+        updateNodeCoordinateDebugLabels();
+        saveTopologySnapshotLocal();
         if (!currentLabId) return;
         const positions = collectNodePositions();
 
@@ -580,7 +1501,10 @@
     }
 
     function queueSaveNodePositions(delayMs) {
-        if (!currentLabId) return;
+        // Save local snapshot immediately so fast reload does not lose latest edits.
+        syncNodeModelPositionFieldsFromView();
+        updateNodeCoordinateDebugLabels();
+        saveTopologySnapshotLocal();
         const delay = Number.isFinite(delayMs) ? delayMs : 120;
         if (positionSaveTimer) {
             clearTimeout(positionSaveTimer);
@@ -604,12 +1528,12 @@
             return;
         }
         try {
-            const response = await fetch(CLAB_API + `/labs/${currentLabId}/nodes/${nodeName}/exec`, {
+            const response = await clabFetch(`/labs/${currentLabId}/nodes/${nodeName}/exec`, {
                 method: "POST",
-                headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ command: command })
             });
-            const result = await response.json();
+            const result = await parseApiResponse(response);
+            ensureClabResponseOk(response, result, 'Exec failed');
             return result.output;
         } catch (error) {
             console.error("Exec failed:", error);
@@ -623,8 +1547,9 @@
             return;
         }
         try {
-            const response = await fetch(CLAB_API + `/labs/${currentLabId}/nodes/${nodeName}/logs?lines=${lines}`);
-            const result = await response.json();
+            const response = await clabFetch(`/labs/${currentLabId}/nodes/${nodeName}/logs?lines=${lines}`);
+            const result = await parseApiResponse(response);
+            ensureClabResponseOk(response, result, 'Get logs failed');
             return result.logs;
         } catch (error) {
             console.error("Get logs failed:", error);
@@ -639,17 +1564,45 @@
         }
         
         try {
-            const response = await fetch(CLAB_API + `/labs/${currentLabId}`);
-            const labState = await response.json();
-            
-            const node = labState.nodes_runtime.find(n => n.name === nodeName);
-            if (node && node.ssh_port) {
-                const sshUrl = `ssh://admin@127.0.0.1:${node.ssh_port}`;
-                console.log("SSH URL:", sshUrl);
-                alert(`SSH connection info:\n${node.name}\nIP: ${node.mgmt_ip}\nPort: ${node.ssh_port}\n\nSSH URL: ${sshUrl}`);
-                // In real browser, could open: window.location.href = sshUrl;
-            }
+            const response = await clabFetch(`/labs/${currentLabId}`);
+            const labState = await parseApiResponse(response);
+            ensureClabResponseOk(response, labState, 'Failed to fetch lab details');
+
+            const runtimeNodes = Array.isArray(labState && labState.nodes_runtime)
+                ? labState.nodes_runtime
+                : [];
+            const requested = String(nodeName || '').trim();
+            const preferred = runtimeNodes.find(n => String(n && n.name || '') === requested)
+                || runtimeNodes.find(n => String(n && n.name || '').endsWith(`-${requested}`));
+            const targetNodeName = String((preferred && preferred.name) || requested).trim();
+
+            const sshResponse = await clabFetch(
+                `/labs/${encodeURIComponent(currentLabId)}/nodes/${encodeURIComponent(targetNodeName)}/ssh`,
+                {
+                    method: 'POST',
+                    body: JSON.stringify({})
+                }
+            );
+            const sshInfo = await parseApiResponse(sshResponse);
+            ensureClabResponseOk(sshResponse, sshInfo, `SSH access request failed for ${targetNodeName}`);
+
+            const host = sshInfo && sshInfo.host ? String(sshInfo.host) : '127.0.0.1';
+            const port = sshInfo && sshInfo.port ? String(sshInfo.port) : '-';
+            const username = sshInfo && sshInfo.username ? String(sshInfo.username) : 'admin';
+            const command = sshInfo && sshInfo.command ? String(sshInfo.command) : `ssh ${username}@${host} -p ${port}`;
+            const expiration = sshInfo && sshInfo.expiration ? String(sshInfo.expiration) : 'n/a';
+
+            alert(
+                `SSH access ready:\n` +
+                `Node: ${targetNodeName}\n` +
+                `Host: ${host}\n` +
+                `Port: ${port}\n` +
+                `User: ${username}\n` +
+                `Expires: ${expiration}\n\n` +
+                `Command: ${command}`
+            );
         } catch (error) {
+            alert(`SSH connect failed: ${error.message || error}`);
             console.error("Connect to node failed:", error);
         }
     }
@@ -679,6 +1632,106 @@
         if (typeof topo.height === 'function') topo.height(size.height);
     }
 
+    function formatNodeCoordLabel(name, x, y) {
+        const base = String(name || 'node');
+        if (!DEBUG_SHOW_NODE_COORD_LABEL) return base;
+        const sx = Number.isFinite(x) ? Math.round(x) : 0;
+        const sy = Number.isFinite(y) ? Math.round(y) : 0;
+        return `${base} (${sx}, ${sy})`;
+    }
+
+    function getStableNodeModelPosition(node) {
+        if (!node || !node.model || typeof node.model !== 'function') return { x: 0, y: 0 };
+        const model = node.model();
+        const raw = (model && model.getData && model.getData()) || {};
+
+        const pos = node.position ? node.position() : null;
+        const posX = Number(pos && pos.x);
+        const posY = Number(pos && pos.y);
+        if (Number.isFinite(posX) && Number.isFinite(posY)) {
+            return { x: posX, y: posY };
+        }
+
+        const rawX = Number(raw.x);
+        const rawY = Number(raw.y);
+        if (Number.isFinite(rawX) && Number.isFinite(rawY)) {
+            return { x: rawX, y: rawY };
+        }
+
+        return { x: 0, y: 0 };
+    }
+
+    function syncNodeModelPositionFieldsFromView() {
+        if (!topo) return;
+        topo.eachNode(function(node) {
+            if (!node || !node.model || typeof node.model !== 'function') return;
+            const model = node.model();
+            if (!model || typeof model.set !== 'function') return;
+            const stablePos = getStableNodeModelPosition(node);
+            if (Number.isFinite(stablePos.x) && Number.isFinite(stablePos.y)) {
+                model.set('x', stablePos.x);
+                model.set('y', stablePos.y);
+            }
+        });
+    }
+
+    function updateNodeCoordinateDebugLabels() {
+        if (!topo) return;
+        topo.eachNode(function(node) {
+            if (!node || !node.model || typeof node.model !== 'function') return;
+            const model = node.model();
+            const raw = (model.getData && model.getData()) || {};
+            const x = Number(raw.x);
+            const y = Number(raw.y);
+            const nodeName = raw.name || raw.id || (node.id ? node.id() : 'node');
+
+            if (model && typeof model.set === 'function') {
+                model.set('debugLabel', formatNodeCoordLabel(nodeName, x, y));
+            }
+        });
+    }
+
+    function applyNodePositionsFromDataWithRetry(retryCount) {
+        if (!topo) return;
+        const restoreMap = pendingRestoreCoordMap && typeof pendingRestoreCoordMap === 'object'
+            ? pendingRestoreCoordMap
+            : null;
+
+        topo.eachNode(function(node) {
+            if (!node || !node.model || typeof node.model !== 'function') return;
+            const raw = (node.model().getData && node.model().getData()) || {};
+            const nodeId = String(raw.id || raw.name || (node.id ? node.id() : ''));
+            const forced = (restoreMap && nodeId && restoreMap[nodeId]) ? restoreMap[nodeId] : null;
+            const forcedX = Number(forced && forced.x);
+            const forcedY = Number(forced && forced.y);
+            const rawX = Number(raw.x);
+            const rawY = Number(raw.y);
+            const x = Number.isFinite(forcedX) ? forcedX : rawX;
+            const y = Number.isFinite(forcedY) ? forcedY : rawY;
+            if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+
+            if (node.model && typeof node.model === 'function') {
+                const model = node.model();
+                if (model && typeof model.set === 'function') {
+                    model.set('x', x);
+                    model.set('y', y);
+                }
+            }
+
+            // Keep rendered icon location aligned with restored model coordinates.
+            if (node.position && typeof node.position === 'function') {
+                try {
+                    node.position({ x: x, y: y });
+                } catch (e) {
+                    // Ignore on NeXt builds without writable node.position.
+                }
+            }
+        });
+
+        updateNodeCoordinateDebugLabels();
+        pendingRestoreCoordMap = null;
+    }
+
     /**
      * NeXt UI Topology Configuration
      */
@@ -687,11 +1740,11 @@
         topo = new nx.graphic.Topology({
             width: size.width,
             height: size.height,
-            dataProcessor: 'force',
+            dataProcessor: '',
             identityKey: 'id',
             
             nodeConfig: {
-                label: 'model.name',
+                label: 'model.debugLabel',
                 iconType: function(model) {
                     // Support both legacy graph data (icon) and editor data (iconType)
                     return model.get('icon') || model.get('iconType') || 'host';
@@ -805,7 +1858,6 @@
                 }
 
                 if (tryCount >= 20) {
-                    console.log('[Tooltip] tooltip_content DOM not ready after retries');
                     return;
                 }
 
@@ -827,6 +1879,11 @@
                 var ip     = ensureNodeMgmtIp(model);
                 var kind   = raw.kind  || '';
                 var state  = raw.state || '';
+                var x      = Number(raw.x);
+                var y      = Number(raw.y);
+                var coordText = (Number.isFinite(x) && Number.isFinite(y))
+                    ? ' (' + Math.round(x) + ', ' + Math.round(y) + ')'
+                    : '';
                 var entries = getNodeConnectivityEntries(nodeId);
 
                 // Connectivity rows
@@ -834,18 +1891,50 @@
                 if (entries.length === 0) {
                     connRows = '<div style="color:#666; font-style:italic; font-size:11px; padding:4px 0;">No links connected.</div>';
                 } else {
-                    connRows = entries.map(function(e) {
-                        return '<div style="display:flex; align-items:center; flex-wrap:wrap; padding:3px 0; border-bottom:1px solid #eee; font-size:11px; gap:1px 2px; color:#000;">'
-                            + '<span style="font-weight:600; color:#000;">' + escapeHtml(e.localIf) + '</span>'
-                            + '<span style="color:#999; margin:0 1px;"> ↔ </span>'
-                            + '<span style="color:#0066cc; font-weight:600;">' + escapeHtml(e.peerName) + '</span>'
-                            + '<span style="color:#666; font-size:10px;"> (' + escapeHtml(e.peerIf) + ')</span>'
+                    var grouped = {};
+                    entries.forEach(function(e) {
+                        var key = String(e.peerId || e.peerName || 'unknown');
+                        if (!grouped[key]) {
+                            grouped[key] = {
+                                peerName: e.peerName || key,
+                                links: []
+                            };
+                        }
+                        grouped[key].links.push(e);
+                    });
+
+                    var peerKeys = Object.keys(grouped).sort(function(a, b) {
+                        return String(grouped[a].peerName).localeCompare(String(grouped[b].peerName));
+                    });
+
+                    connRows = peerKeys.map(function(k) {
+                        var peer = grouped[k];
+                        var linkRows = peer.links.map(function(e, idx) {
+                            var topBorder = idx === 0 ? 'none' : '1px solid #e5edf5';
+                            return '<div style="padding:5px 0; border-top:' + topBorder + ';">'
+                                + '<div style="display:flex; align-items:center; gap:6px;">'
+                                + '<span style="font-size:9px; font-weight:700; color:#0f4c81; background:#dbeafe; border:1px solid #bfdbfe; border-radius:999px; padding:1px 6px; letter-spacing:0.3px;">LOCAL</span>'
+                                + '<span style="font-weight:600; color:#0b1220; font-size:11px;">' + escapeHtml(e.localIf) + '</span>'
+                                + '</div>'
+                                + '<div style="display:flex; align-items:center; gap:6px; margin-top:3px;">'
+                                + '<span style="font-size:9px; font-weight:700; color:#14532d; background:#dcfce7; border:1px solid #bbf7d0; border-radius:999px; padding:1px 6px; letter-spacing:0.3px;">REMOTE</span>'
+                                + '<span style="font-weight:600; color:#0b1220; font-size:11px;">' + escapeHtml(e.peerIf) + '</span>'
+                                + '</div>'
+                                + '</div>';
+                        }).join('');
+
+                        return '<div style="margin-bottom:6px; border:1px solid #dbe7f3; border-radius:7px; background:#f8fbff; padding:6px 8px;">'
+                            + '<div style="font-size:11px; font-weight:700; color:#0f4c81; margin-bottom:4px;">' + escapeHtml(peer.peerName) + '</div>'
+                            + linkRows
                             + '</div>';
                     }).join('');
                 }
 
                 // Build final HTML
-                var html = '<div style="font-size:13px; font-weight:700; color:#000; margin-bottom:6px;">' + escapeHtml(name) + '</div>';
+                var html = '<div style="font-size:13px; font-weight:700; color:#000; margin-bottom:6px;">'
+                    + escapeHtml(name)
+                    + '<span style="font-size:11px; font-weight:500; color:#475569;">' + escapeHtml(coordText) + '</span>'
+                    + '</div>';
                 
                 if (ip) html += '<div style="color:#333; font-size:11px; margin-bottom:2px;">IP: ' + escapeHtml(ip) + '</div>';
                 if (kind) html += '<div style="color:#333; font-size:11px; margin-bottom:2px;">Kind: ' + escapeHtml(kind) + '</div>';
@@ -860,7 +1949,7 @@
                 try {
                     element.innerHTML = html;
                 } catch(e) {
-                    console.log('[Tooltip] Error setting innerHTML:', e);
+                    // Silently ignore innerHTML errors
                 }
             }
         }
@@ -1098,8 +2187,11 @@
             }
 
             document.addEventListener('contextmenu', handleDocumentContextMenu, true);
-            document.addEventListener('mousedown', handleDocumentPointerDown, true);
-            document.addEventListener('mouseup', handleDocumentPointerUp, true);
+            document.addEventListener('mousedown', handleDocumentPointerDown, false);
+            document.addEventListener('mousemove', handleDocumentPointerMove, false);
+            document.addEventListener('dblclick', handleDocumentDoubleClick, false);
+            document.addEventListener('click', handleDocumentClick, false);
+            document.addEventListener('mouseup', handleDocumentPointerUp, false);
             document.addEventListener('keydown', handleDocumentKeyDown, true);
 
             document.addEventListener('mousedown', function(evt) {
@@ -1120,6 +2212,8 @@
         topo.on('clickNode', function(topologyRef, node) {
             // Skip if triggered by a non-primary (right/middle) mouse button.
             if (window.event && typeof window.event.button === 'number' && window.event.button !== 0) return;
+            if (window.event && window.event.ctrlKey) return;
+            if (isTooltipBlocked()) return;
             const now = Date.now();
             lastNodeClickTs = now;
             if (editorMode === 'addLink') {
@@ -1130,12 +2224,37 @@
                 setEditorMode('view');
                 queueSaveNodePositions(60);
             } else if (!suppressNodeDetails) {
-                if (now - lastImmediateFocusTs < INTERACTION.suppressClickNodeMs) {
-                    return;
+                lastNodeClickRecord = { nodeId: node.id(), ts: now };
+                openNodeStatusWindowOnce(node, now);
+            }
+        });
+
+        topo.on('dblclickNode', function(topologyRef, node) {
+            if (isTooltipBlocked()) return;
+            if (!node || editorMode !== 'view' || suppressNodeDetails) return;
+            openNodeStatusWindowOnce(node, Date.now());
+        });
+
+        // Hook into NeXt's native drag events to close tooltip during drag
+        topo.on('dragNode', function(topologyRef, node) {
+            if (topo && typeof topo.tooltipManager === 'function') {
+                try {
+                    topo.tooltipManager().closeAll();
+                } catch (e) {
+                    // Ignore errors
                 }
-                // NOTE: mousedown already called focusNodeImmediately which calls updateStatusPanel.
-                // This is a backup in case mousedown didn't fire for some reason.
-                // focusNodeImmediately always calls updateStatusPanel now, so no need to duplicate.
+            }
+        });
+
+        // Re-open tooltip after drag completes
+        topo.on('dragNodeEnd', function(topologyRef, node) {
+            if (isTooltipBlocked()) return;
+            if (node && topo && typeof topo.tooltipManager === 'function') {
+                try {
+                    topo.tooltipManager().openNodeTooltip(node);
+                } catch (e) {
+                    // Ignore errors
+                }
             }
         });
 
@@ -1156,6 +2275,8 @@
             hideNodeContextMenu();
             return;
         }
+        contextMenuActive = true;
+        blockTooltipAfterContextMenu(700);
         // Close any open NeXt tooltip before showing context menu
         if (topo && typeof topo.tooltipManager === 'function') {
             try { topo.tooltipManager().closeAll(); } catch(e) {}
@@ -1297,6 +2418,83 @@
         updateStatusPanel();
     }
 
+    function openNodeStatusWindow(node) {
+        if (!node || !node.model) return;
+        if (isTooltipBlocked()) return;
+        showNodeDetails(node.model());
+        updateStatusPanel();
+        if (topo && typeof topo.tooltipManager === 'function') {
+            try {
+                topo.tooltipManager().openNodeTooltip(node);
+            } catch (e) {
+                // Keep details panel behavior even if tooltip open fails.
+            }
+        }
+    }
+
+    function openNodeStatusWindowOnce(node, nowTs) {
+        if (!node || typeof node.id !== 'function') return;
+        const now = Number.isFinite(nowTs) ? nowTs : Date.now();
+        if (isTooltipBlocked(now)) return;
+        const nodeId = node.id();
+        if (
+            lastNodeOpenRequest.nodeId === nodeId &&
+            (now - lastNodeOpenRequest.ts) < 140
+        ) {
+            return;
+        }
+        focusNodeImmediately(node, true);
+        openNodeStatusWindow(node);
+        lastNodeOpenRequest = { nodeId: nodeId, ts: now };
+    }
+
+    function handleNodePrimaryClick(node, nowTs) {
+        if (!node || typeof node.id !== 'function') return;
+        openNodeStatusWindowOnce(node, nowTs);
+    }
+
+    function getNodeIdFromEventTarget(target) {
+        if (!target || !target.closest) return null;
+
+        const nodeEl = target.closest('.node, .nodeset, .nodeSet');
+        if (nodeEl && typeof nodeEl.getAttribute === 'function') {
+            const nodeId = String(nodeEl.getAttribute('data-id') || '').trim();
+            if (nodeId && topo && typeof topo.getNode === 'function' && topo.getNode(nodeId)) {
+                return nodeId;
+            }
+        }
+
+        return null;
+    }
+
+    function disableDefaultHoverActivation() {
+        if (!topo || typeof topo.scenesMap !== 'function') return;
+        const scenes = topo.scenesMap() || {};
+        const defaultScene = scenes.default;
+        if (!defaultScene || defaultScene.__nextUiHoverPatched) return;
+
+        // Keep default scene from auto-activating hover fade behavior, but avoid
+        // calling internal recover APIs that can interfere with stage dragging.
+        function ignoreHoverActivation() {}
+
+        defaultScene.enterNode = ignoreHoverActivation;
+        defaultScene.leaveNode = ignoreHoverActivation;
+        defaultScene.enterNodeSet = ignoreHoverActivation;
+        defaultScene.leaveNodeSet = ignoreHoverActivation;
+
+        defaultScene.__nextUiHoverPatched = true;
+    }
+
+    function setBackgroundMoveCursor(enabled) {
+        const shouldEnable = !!enabled;
+        if (backgroundMoveCursorActive === shouldEnable) return;
+        backgroundMoveCursorActive = shouldEnable;
+
+        const surface = getTopologySurfaceElement();
+        if (!surface) return;
+        surface.style.cursor = shouldEnable ? 'move' : '';
+    }
+
     function handleDocumentPointerDown(evt) {
         if (evt.button !== 0) return;
         // On macOS, Ctrl+left-click generates button=0 then contextmenu.
@@ -1313,21 +2511,70 @@
         if (!surface || !surface.contains(evt.target)) return;
 
         if (editorMode === 'view') {
-            // Handle node focus on mousedown to avoid delayed click transitions.
-            const stageScale = Math.max(0.6, getStageTransform().scale || 1);
-            const dynamicFocusRadius = Math.max(INTERACTION.focusPickRadius, 32 * stageScale + 18);
-            const nearest = findNearestNodeByClientPoint(evt.clientX, evt.clientY, dynamicFocusRadius);
-            if (nearest) {
-                focusNodeImmediately(nearest, true);
-                lastNodeClickTs = Date.now();
-                lastImmediateFocusTs = lastNodeClickTs;
-            } else {
-                const clickedNodeElement = evt.target && evt.target.closest
-                    ? evt.target.closest('.node, .nodeSet, .n-topology-icon')
-                    : null;
-                if (!clickedNodeElement) {
-                    clearSelectedNodeVisuals(true);
+            pendingBackgroundClick = null;
+            backgroundPanState = null;
+            const now = Date.now();
+            let resolvedNodeId = getNodeIdFromEventTarget(evt.target);
+            
+            // Fallback: if DOM node class lookup failed, try proximity lookup
+            if (!resolvedNodeId) {
+                const nearbyNode = findNearestNodeByClientPoint(evt.clientX, evt.clientY, INTERACTION.focusPickRadius);
+                if (nearbyNode) {
+                    resolvedNodeId = nearbyNode.id();
                 }
+            }
+
+            // Handle node focus on mousedown to avoid delayed click transitions.
+            if (resolvedNodeId) {
+                setBackgroundMoveCursor(false);
+                const node = topo && typeof topo.getNode === 'function' ? topo.getNode(resolvedNodeId) : null;
+                if (node) {
+                    handleNodePrimaryClick(node, now);
+                    pendingNodeDrag = {
+                        nodeId: resolvedNodeId,
+                        startClientX: evt.clientX,
+                        startClientY: evt.clientY,
+                        startTs: now,
+                        tooltipHidden: false,
+                    };
+                    const isDoubleByDown = (
+                        lastNodePrimaryDown.nodeId === resolvedNodeId &&
+                        (now - lastNodePrimaryDown.ts) <= INTERACTION.doubleClickMs
+                    );
+                    if (isDoubleByDown) {
+                        openNodeStatusWindowOnce(node, now);
+                    }
+                    lastNodePrimaryDown = { nodeId: resolvedNodeId, ts: now };
+                    lastNodeClickTs = now;
+                    lastImmediateFocusTs = now;
+                }
+            } else {
+                // If a node is focused, background click should clear focus, not start pan mode.
+                if (activeSelectedNodeId) {
+                    clearSelectedNodeVisuals(true);
+                    if (topo && typeof topo.tooltipManager === 'function') {
+                        try { topo.tooltipManager().closeAll(); } catch (e) {}
+                    }
+                    setBackgroundMoveCursor(false);
+                    stopBackgroundPanTracking();
+                    return;
+                }
+
+                pendingNodeDrag = null;
+                pendingBackgroundClick = {
+                    clientX: evt.clientX,
+                    clientY: evt.clientY,
+                    moved: false,
+                };
+                backgroundPanState = {
+                    startClientX: evt.clientX,
+                    startClientY: evt.clientY,
+                    lastClientX: evt.clientX,
+                    lastClientY: evt.clientY,
+                    engaged: false,
+                };
+                setBackgroundMoveCursor(true);
+                startBackgroundPanTracking();
             }
             return;
         }
@@ -1344,15 +2591,147 @@
         }
     }
 
-    function handleDocumentPointerUp(evt) {
+    function handleDocumentPointerMove(evt) {
+        // Close tooltip when node drag movement is detected
+        if (pendingNodeDrag && (evt.buttons & 1) === 1) {
+            const dxNode = evt.clientX - pendingNodeDrag.startClientX;
+            const dyNode = evt.clientY - pendingNodeDrag.startClientY;
+            const distanceSq = dxNode * dxNode + dyNode * dyNode;
+            
+            // Check if drag threshold crossed (5px)
+            if (distanceSq >= 25 && !pendingNodeDrag.tooltipHidden) {
+                if (topo && typeof topo.tooltipManager === 'function') {
+                    try {
+                        topo.tooltipManager().closeAll();
+                        pendingNodeDrag.tooltipHidden = true;
+                    } catch (e) {
+                        // Ignore errors
+                    }
+                }
+            }
+        }
+
+        if (backgroundPanState) {
+            const startDx = evt.clientX - backgroundPanState.startClientX;
+            const startDy = evt.clientY - backgroundPanState.startClientY;
+            const startThresholdSq = INTERACTION.backgroundDragStartPx * INTERACTION.backgroundDragStartPx;
+
+            if (!backgroundPanState.engaged) {
+                if ((startDx * startDx + startDy * startDy) < startThresholdSq) {
+                    return;
+                }
+                backgroundPanState.engaged = true;
+                backgroundPanState.lastClientX = evt.clientX;
+                backgroundPanState.lastClientY = evt.clientY;
+                if (pendingBackgroundClick) {
+                    pendingBackgroundClick.moved = true;
+                }
+                return;
+            }
+
+            const dxPan = evt.clientX - backgroundPanState.lastClientX;
+            const dyPan = evt.clientY - backgroundPanState.lastClientY;
+            if (dxPan !== 0 || dyPan !== 0) {
+                const stage = topo && typeof topo.stage === 'function' ? topo.stage() : null;
+                if (stage && typeof stage.applyTranslate === 'function') {
+                    stage.applyTranslate(dxPan, dyPan);
+                } else if (topo && typeof topo.move === 'function') {
+                    topo.move(dxPan, dyPan, 0.2);
+                }
+                backgroundPanState.lastClientX = evt.clientX;
+                backgroundPanState.lastClientY = evt.clientY;
+                backgroundPanState.moved = true;
+                if (pendingBackgroundClick) {
+                    pendingBackgroundClick.moved = true;
+                }
+            }
+            return;
+        }
+
+        if ((evt.buttons & 1) !== 1) return;
+
+        if (!pendingBackgroundClick) return;
+
+        const dx = evt.clientX - pendingBackgroundClick.clientX;
+        const dy = evt.clientY - pendingBackgroundClick.clientY;
+        if ((dx * dx + dy * dy) > 16) {
+            pendingBackgroundClick.moved = true;
+        }
+    }
+
+    function handleDocumentClick(evt) {
         if (evt.button !== 0) return;
-        if (!currentLabId) return;
+        if (evt.ctrlKey) return;
+        if (editorMode !== 'view') return;
 
         const surface = getTopologySurfaceElement();
         if (!surface || !surface.contains(evt.target)) return;
 
-        // Capture final node position after drag/release.
+        const nodeId = getNodeIdFromEventTarget(evt.target);
+        if (nodeId) {
+            pendingBackgroundClick = null;
+            return;
+        }
+        pendingBackgroundClick = null;
+    }
+
+    function handleDocumentDoubleClick(evt) {
+        if (editorMode !== 'view') return;
+
+        const surface = getTopologySurfaceElement();
+        if (!surface || !surface.contains(evt.target)) return;
+
+        let node = null;
+        const nodeId = getNodeIdFromEventTarget(evt.target);
+        if (nodeId) {
+            node = topo && typeof topo.getNode === 'function' ? topo.getNode(nodeId) : null;
+        }
+        if (!node) {
+            // Fallback for SVG/text targets that don't expose a node data-id directly.
+            const pickRadius = Math.max(
+                INTERACTION.focusPickRadius,
+                INTERACTION.linkPickRadius,
+                INTERACTION.contextPickRadius
+            );
+            node = findNearestNodeByClientPoint(evt.clientX, evt.clientY, pickRadius);
+        }
+        if (!node) return;
+
+        openNodeStatusWindowOnce(node, Date.now());
+        evt.preventDefault();
+    }
+
+    function handleDocumentPointerUp(evt) {
+        if (evt.button !== 0) return;
+        
+        // Note: dragNodeEnd event from NeXt will handle tooltip reopening
+        // so we don't need to do it here
+        
+        pendingNodeDrag = null;
+        setBackgroundMoveCursor(false);
+
+        pendingBackgroundClick = null;
+        backgroundPanState = null;
+        stopBackgroundPanTracking();
+
+        // Always capture final position on left-button release.
+        // Drag release can happen slightly outside topology element, so do not gate by event target.
         queueSaveNodePositions(140);
+    }
+
+    function startBackgroundPanTracking() {
+        if (window.__nextuiBgPanMoveBound) return;
+        window.addEventListener('mousemove', handleDocumentPointerMove, true);
+        window.addEventListener('mouseup', handleDocumentPointerUp, true);
+        window.__nextuiBgPanMoveBound = true;
+    }
+
+    function stopBackgroundPanTracking() {
+        if (!window.__nextuiBgPanMoveBound) return;
+        window.removeEventListener('mousemove', handleDocumentPointerMove, true);
+        window.removeEventListener('mouseup', handleDocumentPointerUp, true);
+        window.__nextuiBgPanMoveBound = false;
+        setBackgroundMoveCursor(false);
     }
 
     function cancelActiveLinkCreation() {
@@ -1419,16 +2798,16 @@
     function showNodeContextMenu(nodeId, clientX, clientY) {
         const menu = document.getElementById('nodeContextMenu');
         if (!menu) return;
-        contextMenuNodeId = nodeId;
 
-        // Ensure status panel is updated BEFORE menu displays
-        if (nodeId) {
-            const node = topo.getNode(nodeId);
-            if (node) {
-                showNodeDetails(node.model());
-                updateStatusPanel();  // CRITICAL: Force panel update
-            }
+        if (!nodeId) {
+            hideNodeContextMenu();
+            hideDebugVisuals();
+            return;
         }
+
+        contextMenuActive = true;
+        blockTooltipAfterContextMenu(700);
+        contextMenuNodeId = nodeId;
 
         const addBtn = document.getElementById('ctxAddLinkBtn');
         if (addBtn) {
@@ -1478,6 +2857,8 @@
     function hideNodeContextMenu() {
         const menu = document.getElementById('nodeContextMenu');
         if (!menu) return;
+        contextMenuNodeId = null;
+        contextMenuActive = false;
         menu.classList.remove('open');
     }
 
@@ -1486,13 +2867,21 @@
         evt.preventDefault();
         evt.stopPropagation();
 
+        const directNodeId = getNodeIdFromEventTarget(evt.target);
+        if (directNodeId) {
+            showNodeContextMenu(directNodeId, evt.clientX, evt.clientY);
+            return;
+        }
+
         // Be tolerant for right-click hit-testing; user intent is usually nearby.
         showDebugHitCircle(evt.clientX, evt.clientY, INTERACTION.contextPickRadius);
-        let nearest = findNearestNodeByClientPoint(evt.clientX, evt.clientY, INTERACTION.contextPickRadius);
-        if (!nearest && selectedNodeInfo && selectedNodeInfo.id) {
-            nearest = topo.getNode(selectedNodeInfo.id) || null;
+        const nearest = findNearestNodeByClientPoint(evt.clientX, evt.clientY, INTERACTION.contextPickRadius);
+        if (!nearest) {
+            hideNodeContextMenu();
+            hideDebugVisuals();
+            return;
         }
-        showNodeContextMenu(nearest ? nearest.id() : null, evt.clientX, evt.clientY);
+        showNodeContextMenu(nearest.id(), evt.clientX, evt.clientY);
     }
 
     function startAddLinkFromNode(nodeId) {
@@ -1615,9 +3004,20 @@
             topologyEl.style.position = 'relative';
         }
 
+        // Remove orphan preview layers that can remain after remount/reload cycles.
+        const staleLayers = topologyEl.querySelectorAll(`#${LINK_PREVIEW_LAYER_ID}`);
+        if (staleLayers.length > 1 || (staleLayers.length === 1 && staleLayers[0] !== linkPreviewLayer)) {
+            staleLayers.forEach(function(layer) {
+                if (layer !== linkPreviewLayer) {
+                    try { layer.remove(); } catch (e) {}
+                }
+            });
+        }
+
         if (!linkPreviewLayer) {
             const svgNS = 'http://www.w3.org/2000/svg';
             linkPreviewLayer = document.createElementNS(svgNS, 'svg');
+            linkPreviewLayer.setAttribute('id', LINK_PREVIEW_LAYER_ID);
             linkPreviewLayer.setAttribute('viewBox', `0 0 ${topologyEl.clientWidth || 1} ${topologyEl.clientHeight || 1}`);
             linkPreviewLayer.style.position = 'absolute';
             linkPreviewLayer.style.left = '0';
@@ -1628,6 +3028,7 @@
             linkPreviewLayer.style.zIndex = '500';
 
             linkPreviewLine = document.createElementNS(svgNS, 'line');
+            linkPreviewLine.setAttribute('id', LINK_PREVIEW_LINE_ID);
             linkPreviewLine.setAttribute('stroke', '#FF9800');
             linkPreviewLine.setAttribute('stroke-width', '3');
             linkPreviewLine.setAttribute('stroke-dasharray', '6 4');
@@ -1640,6 +3041,16 @@
 
         linkPreviewLayer.setAttribute('viewBox', `0 0 ${topologyEl.clientWidth || 1} ${topologyEl.clientHeight || 1}`);
         return { topologyEl, line: linkPreviewLine };
+    }
+
+    function cleanupLinkPreviewArtifacts() {
+        hideLinkPreview();
+        const allLayers = document.querySelectorAll(`#${LINK_PREVIEW_LAYER_ID}`);
+        allLayers.forEach(function(layer) {
+            try { layer.remove(); } catch (e) {}
+        });
+        linkPreviewLayer = null;
+        linkPreviewLine = null;
     }
 
     function showLinkPreview(startX, startY, endX, endY) {
@@ -1655,6 +3066,10 @@
     function hideLinkPreview() {
         if (linkPreviewLine) {
             linkPreviewLine.style.display = 'none';
+        }
+        const existing = document.getElementById(LINK_PREVIEW_LINE_ID);
+        if (existing) {
+            existing.style.display = 'none';
         }
     }
 
@@ -1710,6 +3125,7 @@
             window.cancelAnimationFrame(previewRafId);
             previewRafId = null;
         }
+        hideLinkPreview();
         contextMenuNodeId = null;
         lastLinkPick = { nodeId: null, ts: 0 };
         surfaceRectCache = { el: null, ts: 0, rect: null };
@@ -1805,6 +3221,11 @@
             return;
         }
 
+        if (isReservedInterface(linkDraft.srcKind, srcIfName) || isReservedInterface(linkDraft.tgtKind, tgtIfName)) {
+            alert('Selected interface is reserved for management and cannot be used for links.');
+            return;
+        }
+
         const addedLink = topo.addLink({
             source: linkDraft.srcId,
             target: linkDraft.tgtId,
@@ -1821,6 +3242,7 @@
         closeModal('linkIfModal');
         clearLinkDraft();
         setEditorMode('view');
+        queueSaveNodePositions(60);
     }
 
     function cancelLinkInterfaceSelection() {
@@ -1836,6 +3258,7 @@
         if (mode !== 'addLink') {
             closeModal('linkIfModal');
             clearLinkDraft();
+            cleanupLinkPreviewArtifacts();
         }
 
         if (mode !== 'view') {
@@ -1843,6 +3266,14 @@
         }
 
         editorMode = mode;
+        if (mode === 'view' && topo) {
+            if (typeof topo.activateScene === 'function') {
+                try { topo.activateScene('default'); } catch (e) {}
+            }
+            if (typeof topo.blockEvent === 'function') {
+                try { topo.blockEvent(false); } catch (e) {}
+            }
+        }
         setLinkPreviewMouseTracking(mode === 'addLink');
         linkSourceNodeId = null;
         suppressNodeDetails = (mode === 'addLink');
@@ -1932,6 +3363,8 @@
         if (!confirm('Clear current topology?')) return;
         topo.clear();
         nodeInterfaceCounters.clear();
+        cleanupLinkPreviewArtifacts();
+        clearTopologySnapshotLocal();
         currentLabId = null;
         setEditorMode('view');
         updateStatusPanel();
@@ -2084,17 +3517,46 @@
         };
     }
 
-    function getBulkNodeOffset(index, count) {
+    function getBulkLayoutParams(count) {
+        const safeCount = Math.max(1, Number(count) || 1);
+        const cols = Math.ceil(Math.sqrt(safeCount));
+        const rows = Math.ceil(safeCount / cols);
+
+        const stageEl = getTopologySurfaceElement();
+        const tf = getStageTransform();
+        const scale = Number.isFinite(tf.scale) && tf.scale > 0 ? tf.scale : 1;
+
+        const viewportModelWidth = stageEl ? (stageEl.clientWidth / scale) : 1000;
+        const viewportModelHeight = stageEl ? (stageEl.clientHeight / scale) : 700;
+        const pad = 70;
+
+        const spacingX = cols > 1 ? (viewportModelWidth - (pad * 2)) / (cols - 1) : 0;
+        const spacingY = rows > 1 ? (viewportModelHeight - (pad * 2)) / (rows - 1) : 0;
+
+        const maxSpacing = 90;
+        const minSpacing = 18;
+        let spacing = maxSpacing;
+        if (cols > 1 || rows > 1) {
+            const sx = Number.isFinite(spacingX) && spacingX > 0 ? spacingX : maxSpacing;
+            const sy = Number.isFinite(spacingY) && spacingY > 0 ? spacingY : maxSpacing;
+            spacing = Math.max(minSpacing, Math.min(maxSpacing, sx, sy));
+        }
+
+        return { cols, rows, spacing };
+    }
+
+    function getBulkNodeOffset(index, count, layoutParams) {
         if (count <= 1) {
             return { x: 0, y: 0 };
         }
 
-        const spacing = 90;
-        const cols = Math.ceil(Math.sqrt(count));
-        const rows = Math.ceil(count / cols);
+        const params = layoutParams || getBulkLayoutParams(count);
+        const spacing = params.spacing;
+        const cols = params.cols;
+        const rows = params.rows;
         const row = Math.floor(index / cols);
         const col = index % cols;
-        const jitter = 12;
+        const jitter = Math.min(8, Math.max(0, spacing * 0.12));
 
         return {
             x: (col - (cols - 1) / 2) * spacing + (Math.random() * jitter * 2 - jitter),
@@ -2106,12 +3568,18 @@
      * Open Add Node modal
      */
     function openAddNodeModal() {
+        const hasRegisteredKinds = refreshAddNodeKindOptions('linux');
+        if (!hasRegisteredKinds) {
+            alert('No kind/image mapping is registered.\nPlease add at least one mapping in Develop > Kind -> Image Registry.');
+            return;
+        }
+
         document.getElementById('nodeName').value = 'r-{$count}';
         const countEl = document.getElementById('nodeCount');
         if (countEl) countEl.value = '1';
-        document.getElementById('nodeKind').value = 'linux';
-        document.getElementById('nodeImage').value = KIND_DEFAULTS.linux.image;
-        document.getElementById('nodeIcon').value  = KIND_DEFAULTS.linux.icon;
+        const selectedKind = document.getElementById('nodeKind').value;
+        const defs = KIND_DEFAULTS[selectedKind] || { icon: 'host' };
+        document.getElementById('nodeIcon').value = defs.icon;
         document.getElementById('addNodeModal').classList.add('open');
         document.getElementById('nodeName').focus();
     }
@@ -2120,9 +3588,21 @@
      * Auto-fill image/icon when kind changes in the Add Node modal
      */
     function onKindChange() {
-        const kind = document.getElementById('nodeKind').value;
-        const defs = KIND_DEFAULTS[kind] || { image: '', icon: 'host' };
-        document.getElementById('nodeImage').value = defs.image;
+        const kindSelect = document.getElementById('nodeKind');
+        const imageSelect = document.getElementById('nodeImage');
+        if (!kindSelect || !imageSelect) return;
+
+        const kind = kindSelect.value;
+        const mappedImage = getRegisteredImageForKind(kind);
+        const defs = KIND_DEFAULTS[kind] || { icon: 'host' };
+        imageSelect.innerHTML = '';
+
+        const option = document.createElement('option');
+        option.value = mappedImage || '';
+        option.textContent = option.value || '(no image registered)';
+        imageSelect.appendChild(option);
+        imageSelect.value = option.value;
+
         document.getElementById('nodeIcon').value  = defs.icon;
     }
 
@@ -2142,8 +3622,16 @@
         }
 
         const kind     = document.getElementById('nodeKind').value;
-        const image    = document.getElementById('nodeImage').value.trim();
+        const image    = (document.getElementById('nodeImage').value || '').trim();
         const iconType = document.getElementById('nodeIcon').value;
+        const registeredImage = getRegisteredImageForKind(kind);
+
+        if (!kind) { alert('Select a registered kind first.'); return; }
+        if (!image) { alert('No registered image for selected kind. Register it in Develop tab first.'); return; }
+        if (!registeredImage || image !== registeredImage) {
+            alert('Selected kind/image is not registered. Re-open Add Node and try again.');
+            return;
+        }
 
         // Collect existing nodes using NeXt's iterator API.
         const existingNodes = [];
@@ -2151,13 +3639,17 @@
             existingNodes.push(node);
         });
 
-        const basePos = getBulkNodeBasePosition(existingNodes);
+        const basePos = nodeNames.length > 1
+            ? getViewportCenterModelPosition()
+            : getBulkNodeBasePosition(existingNodes);
+        const bulkLayout = getBulkLayoutParams(nodeNames.length);
         let firstAddedNode = null;
         let createdCount = 0;
         const skippedNames = [];
+        const addedNodes = [];
 
         nodeNames.forEach(function(name, index) {
-            const offset = getBulkNodeOffset(index, nodeNames.length);
+            const offset = getBulkNodeOffset(index, nodeNames.length, bulkLayout);
             let x = basePos.x + offset.x;
             let y = basePos.y + offset.y;
 
@@ -2186,6 +3678,7 @@
             }
 
             createdCount += 1;
+            addedNodes.push(addedNode);
             if (!firstAddedNode) {
                 firstAddedNode = addedNode;
             }
@@ -2196,7 +3689,27 @@
             return;
         }
 
-        if (firstAddedNode && !isNodeVisibleInViewport(firstAddedNode)) {
+        if (addedNodes.length > 1) {
+            const centerModel = addedNodes.reduce(function(acc, node) {
+                const pos = node.position ? node.position() : { x: 0, y: 0 };
+                acc.x += (pos && Number.isFinite(pos.x)) ? pos.x : 0;
+                acc.y += (pos && Number.isFinite(pos.y)) ? pos.y : 0;
+                return acc;
+            }, { x: 0, y: 0 });
+            centerModel.x /= addedNodes.length;
+            centerModel.y /= addedNodes.length;
+
+            const stageEl = getTopologySurfaceElement();
+            if (stageEl && topo && typeof topo.getAbsolutePosition === 'function') {
+                const rect = stageEl.getBoundingClientRect();
+                const centerAbs = topo.getAbsolutePosition(centerModel);
+                if (centerAbs && Number.isFinite(centerAbs.x) && Number.isFinite(centerAbs.y)) {
+                    const dx = (rect.left + rect.width / 2) - centerAbs.x;
+                    const dy = (rect.top + rect.height / 2) - centerAbs.y;
+                    topo.move(dx, dy, 0.25);
+                }
+            }
+        } else if (firstAddedNode && !isNodeVisibleInViewport(firstAddedNode)) {
             centerNodeInViewport(firstAddedNode);
         }
 
@@ -2256,6 +3769,24 @@
         return { labName, nodes, links };
     }
 
+    function normalizeInterfaceNameForYaml(kind, ifName) {
+        const kindKey = String(kind || '').trim();
+        const label = String(ifName || '').trim();
+
+        // XRD requires Gi0-0-0-x style in endpoints for reliable parsing.
+        if (kindKey === 'cisco_xrd' || kindKey === 'xrd') {
+            if (!label || label === 'eth0') return 'Gi0-0-0-0';
+
+            const longMatch = label.match(/^GigabitEthernet0\/0\/0\/(\d+)$/i);
+            if (longMatch) return `Gi0-0-0-${longMatch[1]}`;
+
+            const shortMatch = label.match(/^Gi0-0-0-(\d+)$/i);
+            if (shortMatch) return `Gi0-0-0-${shortMatch[1]}`;
+        }
+
+        return label || 'eth0';
+    }
+
     /**
      * Generate containerlab YAML string from current topology
      */
@@ -2271,13 +3802,22 @@
             if (n.image) yaml += `      image: ${n.image}\n`;
         }
 
+        const nodeKindById = new Map();
+        for (const n of nodes) {
+            nodeKindById.set(String(n.id), n.kind);
+            nodeKindById.set(String(n.name), n.kind);
+        }
+
         yaml += `\n  links:\n`;
         if (links.length === 0) {
             yaml += `    []  # no links defined\n`;
         } else {
-            yaml += `    endpoints:\n`;
             for (const l of links) {
-                yaml += `      - ["${l.source}:${l.srcIfName}", "${l.target}:${l.tgtIfName}"]\n`;
+                const srcKind = nodeKindById.get(String(l.source)) || '';
+                const tgtKind = nodeKindById.get(String(l.target)) || '';
+                const srcIfName = normalizeInterfaceNameForYaml(srcKind, l.srcIfName);
+                const tgtIfName = normalizeInterfaceNameForYaml(tgtKind, l.tgtIfName);
+                yaml += `    - endpoints: ["${l.source}:${srcIfName}", "${l.target}:${tgtIfName}"]\n`;
             }
         }
 
@@ -2330,30 +3870,18 @@
      * Deploy the currently-drawn topology to clab-api-server
      */
     async function deployCurrentTopology() {
-        const { labName, nodes, links } = getCurrentTopologyData();
-
-        // Convert to TopologySpec format expected by the backend
-        const topologySpec = {
-            lab_name: labName,
-            nodes: nodes.map(n => ({
-                id:    n.id,
-                name:  n.name,
-                kind:  n.kind,
-                image: n.image,
-                role:  'undefined'
-            })),
-            links: links.map((l, i) => ({
-                id:    `link-${i}`,
-                a_node: l.source,
-                a_if:   l.srcIfName,
-                b_node: l.target,
-                b_if:   l.tgtIfName
-            }))
-        };
+        const yamlContent = generateYAML();
+        if (!yamlContent || yamlContent.startsWith('# No nodes')) {
+            alert('No nodes to deploy. Add nodes first.');
+            return;
+        }
 
         try {
-            const result = await deployTopology(topologySpec);
-            alert(`Lab deployed: ${result.lab_id || result.lab_name || 'success'}`);
+            const result = await deployTopologyFromYAML(yamlContent);
+            const deployedLabId = result.lab_id || result.lab_name || getLabIdFromInput() || 'success';
+            await refreshCurrentLabStatus(deployedLabId);
+            startLabStatusPolling();
+            alert(`Lab deployed: ${deployedLabId}`);
             await fetchTopology();
             updateStatusPanel();
         } catch (err) {
@@ -2402,19 +3930,31 @@
     nx.define('Shell', nx.ui.Application, {
         methods: {
             start: function () {
+                topo.attach(topologyApp || this);
+                ensureTopologyMountedInContainer();
+                syncTopologyViewportSize();
+                disableDefaultHoverActivation();
+                setupNodeClickHandler();
+                if (typeof topo.activateScene === 'function') {
+                    try { topo.activateScene('default'); } catch (e) {}
+                }
+                if (typeof topo.blockEvent === 'function') {
+                    try { topo.blockEvent(false); } catch (e) {}
+                }
+
                 // Try API first, fallback to static topology.js
                 fetchTopology().then(topologyData => {
-                    console.log("Topology data loaded:", topologyData);
-                    topo.data(topologyData);
-                    syncTopologyViewportSize();
-                    topo.eachNode(function(node) {
-                        ensureNodeMgmtIp(node.model());
-                    });
-                    topo.attach(topologyApp || this);
-                    ensureTopologyMountedInContainer();
-                    setupNodeClickHandler();
-                    updateStatusPanel();
-                    queueSaveNodePositions(300);
+                    const savedViewport = topologyData && topologyData.__viewport ? topologyData.__viewport : null;
+                    pendingRestoreCoordMap = buildCoordMapFromNodes((topologyData && topologyData.nodes) || []);
+                    topo.setData(topologyData, function() {
+                        syncTopologyViewportSize();
+                        topo.eachNode(function(node) {
+                            ensureNodeMgmtIp(node.model());
+                        });
+                        applyNodePositionsFromDataWithRetry(0);
+                        updateNodeCoordinateDebugLabels();
+                        updateStatusPanel();
+                    }, this);
                 }).catch(error => {
                     console.error("Failed to load topology:", error);
                     alert("Failed to load topology. Check console for details.");
@@ -2424,22 +3964,6 @@
     });
 
     /**
-     * Update the compact lab status indicators in the header.
-     */
-    function updateLabStatusIndicators() {
-        const labDot = document.getElementById('lab-deployed-dot');
-        const apiDot = document.getElementById('api-on-dot');
-        if (labDot) {
-            labDot.className = currentLabId ? 'lab-dot dot-green' : 'lab-dot dot-red';
-            labDot.title = currentLabId ? `Active: ${currentLabId}` : 'Not deployed';
-        }
-        if (apiDot) {
-            apiDot.className = apiMode ? 'lab-dot dot-green' : 'lab-dot dot-red';
-            apiDot.title = apiMode ? 'API connected' : 'Static mode';
-        }
-    }
-
-    /**
      * Clear node selection from the floating panel close button.
      */
     function clearNodeSelection() {
@@ -2447,11 +3971,11 @@
     }
 
     /**
-     * Status Panel — now only updates header lab status dots.
+     * Status Panel hook retained for node/selection refresh flow.
      * Node info and connectivity are shown in the NeXt tooltip.
      */
     function updateStatusPanel() {
-        updateLabStatusIndicators();
+        // Status updates are handled by NeXt tooltip callbacks
     }
 
     /**
@@ -2459,13 +3983,14 @@
      */
     window.nextUI = {
         // API / lab lifecycle
-        fetchTopology,
         deployTopology,
         deployCurrentTopology,
         destroyLab,
+        destroyLabAndClean,
         execNodeCommand,
         getNodeLogs,
         connectToNode,
+        refreshCurrentLabStatus,
         clearSavedNodePositions,
         runSelectedNodeCommand,
         connectToSelectedNode,
@@ -2488,7 +4013,12 @@
         generateYAML,
         closeModal,
         clearNodeSelection,
-        updateLabStatusIndicators,
+        switchMainTab,
+        connectRemoteServer,
+        disconnectRemoteServer,
+        refreshRemoteMetricsNow,
+        saveKindImageMapping,
+        removeKindImageMapping,
     };
 
     // Initialize on DOM ready
@@ -2496,12 +4026,17 @@
         topologyApp = new nx.ui.Application({
             el: document.getElementById('topology')
         });
+        initKindImageRegistryUI();
         initTopology();
         const shell = new Shell();
         shell.start();
+        restoreRemoteServerForm();
         window.addEventListener('resize', function() {
             ensureTopologyMountedInContainer();
             syncTopologyViewportSize();
+            if (editorMode !== 'addLink') {
+                cleanupLinkPreviewArtifacts();
+            }
         });
     });
 
