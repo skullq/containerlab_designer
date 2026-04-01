@@ -197,7 +197,9 @@
                 min-width: 180px;
             }
             #controls-server #server-auth-status,
-            #controls-server #kind-image-status {
+            #controls-server #kind-image-status,
+            #controls-server #mgmt-network-status,
+            #controls-server #ssh-port-range-status {
                 width: 100%;
                 margin-left: 0;
                 margin-top: 2px;
@@ -263,14 +265,14 @@
                 top: 12px;
                 right: 12px;
                 width: fit-content;
-                min-width: 320px;
-                max-width: min(680px, calc(100% - 24px));
+                min-width: 280px;
+                max-width: min(560px, calc(100% - 24px));
                 max-height: calc(100% - 24px);
                 overflow: hidden;
-                background: rgba(255, 255, 255, 0.96);
+                background: rgba(255, 255, 255, 0.97);
                 border: 1px solid #dbe3ee;
-                border-radius: 10px;
-                box-shadow: 0 8px 22px rgba(15, 23, 42, 0.14);
+                border-radius: 12px;
+                box-shadow: 0 10px 24px rgba(15, 23, 42, 0.12);
                 backdrop-filter: blur(4px);
                 z-index: 1200;
                 display: none;
@@ -290,19 +292,19 @@
             .deploy-access-head {
                 display: flex;
                 align-items: center;
-                gap: 8px;
-                padding: 10px 12px;
+                gap: 6px;
+                padding: 8px 10px;
                 border-bottom: 1px solid #e6edf6;
-                background: #f8fafc;
+                background: linear-gradient(180deg, #f8fafc 0%, #f1f5f9 100%);
                 cursor: move;
-                border-radius: 10px 10px 0 0;
+                border-radius: 12px 12px 0 0;
             }
             .deploy-access-panel.minimized .deploy-access-head {
                 border-bottom: none;
-                border-radius: 10px;
+                border-radius: 12px;
             }
             .deploy-access-title {
-                font-size: 11px;
+                font-size: 10px;
                 text-transform: uppercase;
                 letter-spacing: 0.06em;
                 color: #475569;
@@ -311,30 +313,33 @@
                 cursor: move;
             }
             .deploy-access-status {
-                font-size: 12px;
+                font-size: 11px;
                 color: #64748b;
-                padding: 8px 12px;
+                padding: 6px 10px;
                 border-bottom: 1px solid #e6edf6;
+            }
+            .deploy-access-status:empty {
+                display: none;
             }
             .deploy-access-body {
                 overflow: auto;
-                max-height: 44vh;
+                max-height: 34vh;
             }
             .deploy-access-table {
                 width: max-content;
                 min-width: 100%;
                 border-collapse: collapse;
-                font-size: 12px;
+                font-size: 11px;
             }
             .deploy-access-table th,
             .deploy-access-table td {
-                padding: 7px 10px;
+                padding: 5px 8px;
                 border-bottom: 1px solid #eef2f7;
                 text-align: left;
                 vertical-align: middle;
             }
             .deploy-access-table th {
-                font-size: 11px;
+                font-size: 10px;
                 text-transform: uppercase;
                 color: #64748b;
                 background: #fbfdff;
@@ -343,13 +348,13 @@
                 display: inline-flex;
                 align-items: center;
                 max-width: 100%;
-                padding: 4px 9px;
+                padding: 3px 7px;
                 border: 1px solid #c7dcff;
                 border-radius: 999px;
                 background: linear-gradient(180deg, #f8fbff 0%, #eff6ff 100%);
                 color: #1e40af;
                 font-family: Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
-                font-size: 11px;
+                font-size: 10px;
                 white-space: nowrap;
                 text-overflow: ellipsis;
                 overflow: hidden;
@@ -615,6 +620,26 @@
                 height: 220px;
             }
 
+            .export-format-tabs {
+                display: flex;
+                gap: 6px;
+                margin-bottom: 8px;
+            }
+            .export-tab-btn {
+                padding: 5px 10px;
+                border: 1px solid #cbd5e1;
+                background: #f8fafc;
+                color: #334155;
+                border-radius: 6px;
+                font-size: 11px;
+                font-weight: 600;
+            }
+            .export-tab-btn.active {
+                background: #dbeafe;
+                border-color: #93c5fd;
+                color: #1e3a8a;
+            }
+
             /* Compact Link Interface modal */
             #linkIfModal .modal-box {
                 min-width: 260px;
@@ -760,6 +785,42 @@
                 <button class="secondary" onclick="nextUI.disconnectRemoteServer()">Disconnect</button>
                 <button class="secondary" onclick="nextUI.refreshRemoteMetricsNow()">Refresh Now</button>
                 <span id="server-auth-status">Enter server credentials and connect.</span>
+            </div>
+
+            <div class="control-section server-full" style="align-items:flex-start;">
+                <h4>YAML Mgmt Network</h4>
+                <div style="display:flex;align-items:center;gap:8px;width:100%;flex-wrap:wrap;">
+                    <span style="min-width:170px;font-size:12px;font-weight:600;color:#334155;">Mgmt Network :</span>
+                    <input id="mgmt-network-name-input" class="dev-input" type="text" value="clab-mgmt" placeholder="e.g. clab-mgmt" style="flex:1;min-width:220px;">
+                    <span style="font-size:11px;color:#64748b;">(YAML common mgmt.network value)</span>
+                </div>
+                <div style="display:flex;align-items:center;gap:8px;width:100%;flex-wrap:wrap;">
+                    <span style="min-width:170px;font-size:12px;font-weight:600;color:#334155;">IPv4 Subnet :</span>
+                    <input id="mgmt-network-subnet-input" class="dev-input" type="text" value="172.20.20.0/24" placeholder="e.g. 172.20.20.0/24" style="flex:1;min-width:220px;">
+                    <span style="font-size:11px;color:#64748b;">(YAML common mgmt.ipv4-subnet value)</span>
+                </div>
+                <textarea id="mgmt-network-preview" class="dev-input" readonly style="width:100%;min-height:72px;font-family:Menlo,Monaco,Consolas,'Courier New',monospace;font-size:11px;line-height:1.35;">mgmt:
+  network: clab-mgmt
+  ipv4-subnet: 172.20.20.0/24</textarea>
+                <span id="mgmt-network-status">This block will be added above topology in exported YAML and deploy payload.</span>
+            </div>
+
+            <div class="control-section server-full" style="align-items:flex-start;">
+                <h4>Node SSH Port Range</h4>
+                <div style="display:flex;align-items:center;gap:8px;width:100%;flex-wrap:wrap;">
+                    <span style="min-width:170px;font-size:12px;font-weight:600;color:#334155;">Start Port :</span>
+                    <input id="ssh-port-range-start-input" class="dev-input" type="number" min="1" max="65535" placeholder="e.g. 3022" style="flex:1;min-width:220px;">
+                    <span style="font-size:11px;color:#64748b;">(First host-side SSH port)</span>
+                </div>
+                <div style="display:flex;align-items:center;gap:8px;width:100%;flex-wrap:wrap;">
+                    <span style="min-width:170px;font-size:12px;font-weight:600;color:#334155;">End Port :</span>
+                    <input id="ssh-port-range-end-input" class="dev-input" type="number" min="1" max="65535" placeholder="e.g. 3099" style="flex:1;min-width:220px;">
+                    <span style="font-size:11px;color:#64748b;">(Last host-side SSH port)</span>
+                </div>
+                <textarea id="ssh-port-range-preview" class="dev-input" readonly style="width:100%;min-height:72px;font-family:Menlo,Monaco,Consolas,'Courier New',monospace;font-size:11px;line-height:1.35;"># Leave blank to omit ports from YAML
+ports:
+  - 3022:22</textarea>
+                <span id="ssh-port-range-status">When both values are set, nodes will get sequential SSH port mappings like 3022:22.</span>
             </div>
 
             <div class="control-section server-full" style="align-items:flex-start;">
@@ -936,11 +997,15 @@
         <div id="yamlModal" class="modal-overlay">
             <div class="modal-box">
                 <h3>Export containerlab YAML</h3>
+                <div class="export-format-tabs">
+                    <button id="export-tab-yaml" class="export-tab-btn active" onclick="nextUI.setExportFormat('yaml')">YAML</button>
+                    <button id="export-tab-json" class="export-tab-btn" onclick="nextUI.setExportFormat('json')">JSON</button>
+                </div>
                 <textarea id="yaml-output" readonly></textarea>
                 <div class="modal-actions">
                     <button class="secondary" onclick="nextUI.closeModal('yamlModal')">Close</button>
-                    <button onclick="nextUI.copyYAML()">Copy to Clipboard</button>
-                    <button class="success" onclick="nextUI.downloadYAML()">Download</button>
+                    <button id="export-copy-btn" onclick="nextUI.copyYAML()">Copy YAML</button>
+                    <button id="export-download-btn" class="success" onclick="nextUI.downloadYAML()">Download YAML</button>
                 </div>
             </div>
         </div>

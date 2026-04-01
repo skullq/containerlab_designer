@@ -4,7 +4,18 @@
     "cisco_xrd": {
       "image": "ios-xr/xrd-control-plane:26.1.1",
       "login_name": "clab"
+    },
+    "linux": {
+      "image": "ubuntu:20.04",
+      "login_name": "clab",
+      "interface_rule": {
+        "prefix": "eth",
+        "start": 0,
+        "max": 16,
+        "style": "eth"
+      },
+      "reserved_interfaces": []
     }
   },
-  "updated_at": "2026-03-31T19:49:20.379434Z"
+  "updated_at": "2026-04-01T06:14:11.518585Z"
 }

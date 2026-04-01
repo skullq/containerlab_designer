@@ -52,11 +52,24 @@
     const MGMT_IP_PREFIX = '172.31.255';
     const LAYOUT_STORAGE_PREFIX = 'next_ui.layout.';
     const TOPOLOGY_SNAPSHOT_KEY = 'next_ui.topology_snapshot.v1';
+    const DEPLOYED_EXPORTS_KEY = 'next_ui.deployed_exports.v1';
     const REMOTE_STORAGE_KEYS = {
         serverUrl: 'next_ui.remote_server_url',
         username: 'next_ui.remote_username',
         token: 'next_ui.remote_token',
         password: 'next_ui.remote_password',
+    };
+    const MGMT_NETWORK_STORAGE_KEYS = {
+        name: 'next_ui.mgmt_network_name',
+        subnet: 'next_ui.mgmt_network_subnet',
+    };
+    const SSH_PORT_RANGE_STORAGE_KEYS = {
+        start: 'next_ui.ssh_port_range_start',
+        end: 'next_ui.ssh_port_range_end',
+    };
+    const DEFAULT_MGMT_NETWORK = {
+        name: 'clab-mgmt',
+        ipv4Subnet: '172.20.20.0/24',
     };
     const DEBUG_SHOW_NODE_COORD_LABEL = true;
     let mgmtHostCounter = 10;
@@ -73,7 +86,10 @@
     let lastRemoteApiConnected = false;
     let lastRemoteApiLabel = 'Disconnected';
     let activeMainTab = 'topology';
+    let exportPreviewFormat = 'yaml';
     let deploymentAccessPanelRequested = false;
+    let lastDeploymentAccessStatusKey = '';
+    let lastDeploymentAccessRowsKey = '';
     let kindImageRegistry = {};
     let defaultLoginName = 'admin';
     const LINK_PREVIEW_LAYER_ID = 'nextui-link-preview-layer';
@@ -283,6 +299,207 @@
         }
     }
 
+    function readStoredMgmtNetworkConfig() {
+        return {
+            name: String(localStorage.getItem(MGMT_NETWORK_STORAGE_KEYS.name) || '').trim(),
+            ipv4Subnet: String(localStorage.getItem(MGMT_NETWORK_STORAGE_KEYS.subnet) || '').trim(),
+        };
+    }
+
+    function persistMgmtNetworkConfig(config) {
+        if (!config || typeof config !== 'object') return;
+
+        if (Object.prototype.hasOwnProperty.call(config, 'name')) {
+            const nameValue = String(config.name || '').trim();
+            if (nameValue) localStorage.setItem(MGMT_NETWORK_STORAGE_KEYS.name, nameValue);
+            else localStorage.removeItem(MGMT_NETWORK_STORAGE_KEYS.name);
+        }
+
+        if (Object.prototype.hasOwnProperty.call(config, 'ipv4Subnet')) {
+            const subnetValue = String(config.ipv4Subnet || '').trim();
+            if (subnetValue) localStorage.setItem(MGMT_NETWORK_STORAGE_KEYS.subnet, subnetValue);
+            else localStorage.removeItem(MGMT_NETWORK_STORAGE_KEYS.subnet);
+        }
+    }
+
+    function sanitizeMgmtNetworkConfig(config) {
+        const source = (config && typeof config === 'object') ? config : {};
+        const name = String(source.name || '').trim() || DEFAULT_MGMT_NETWORK.name;
+        const ipv4Subnet = String(source.ipv4Subnet || source.ipv4_subnet || '').trim() || DEFAULT_MGMT_NETWORK.ipv4Subnet;
+        return {
+            name: name,
+            ipv4Subnet: ipv4Subnet,
+        };
+    }
+
+    function getMgmtNetworkConfig() {
+        const nameEl = document.getElementById('mgmt-network-name-input');
+        const subnetEl = document.getElementById('mgmt-network-subnet-input');
+        const config = sanitizeMgmtNetworkConfig({
+            name: nameEl ? nameEl.value : '',
+            ipv4Subnet: subnetEl ? subnetEl.value : '',
+        });
+        return config;
+    }
+
+    function refreshMgmtNetworkPreview() {
+        const config = getMgmtNetworkConfig();
+        const previewEl = document.getElementById('mgmt-network-preview');
+        const statusEl = document.getElementById('mgmt-network-status');
+
+        if (previewEl) {
+            previewEl.value = [
+                'mgmt:',
+                `  network: ${config.name}`,
+                `  ipv4-subnet: ${config.ipv4Subnet}`,
+            ].join('\n');
+        }
+
+        if (statusEl) {
+            statusEl.textContent = `Using mgmt network ${config.name} with subnet ${config.ipv4Subnet}.`;
+            statusEl.style.color = '#64748b';
+        }
+
+        persistMgmtNetworkConfig(config);
+        return config;
+    }
+
+    function initMgmtNetworkSettingsUI() {
+        const stored = sanitizeMgmtNetworkConfig(readStoredMgmtNetworkConfig());
+        const nameEl = document.getElementById('mgmt-network-name-input');
+        const subnetEl = document.getElementById('mgmt-network-subnet-input');
+
+        if (nameEl) {
+            nameEl.value = stored.name;
+            nameEl.addEventListener('input', refreshMgmtNetworkPreview);
+            nameEl.addEventListener('change', refreshMgmtNetworkPreview);
+        }
+        if (subnetEl) {
+            subnetEl.value = stored.ipv4Subnet;
+            subnetEl.addEventListener('input', refreshMgmtNetworkPreview);
+            subnetEl.addEventListener('change', refreshMgmtNetworkPreview);
+        }
+
+        refreshMgmtNetworkPreview();
+    }
+
+    function toValidPortNumber(value) {
+        const parsed = Number(value);
+        if (!Number.isFinite(parsed)) return null;
+        const port = Math.trunc(parsed);
+        if (port < 1 || port > 65535) return null;
+        return port;
+    }
+
+    function readStoredSshPortRangeConfig() {
+        return {
+            start: String(localStorage.getItem(SSH_PORT_RANGE_STORAGE_KEYS.start) || '').trim(),
+            end: String(localStorage.getItem(SSH_PORT_RANGE_STORAGE_KEYS.end) || '').trim(),
+        };
+    }
+
+    function persistSshPortRangeConfig(config) {
+        if (!config || typeof config !== 'object') return;
+
+        if (Object.prototype.hasOwnProperty.call(config, 'start')) {
+            const startValue = String(config.start || '').trim();
+            if (startValue) localStorage.setItem(SSH_PORT_RANGE_STORAGE_KEYS.start, startValue);
+            else localStorage.removeItem(SSH_PORT_RANGE_STORAGE_KEYS.start);
+        }
+
+        if (Object.prototype.hasOwnProperty.call(config, 'end')) {
+            const endValue = String(config.end || '').trim();
+            if (endValue) localStorage.setItem(SSH_PORT_RANGE_STORAGE_KEYS.end, endValue);
+            else localStorage.removeItem(SSH_PORT_RANGE_STORAGE_KEYS.end);
+        }
+    }
+
+    function getSshPortRangeConfig() {
+        const startEl = document.getElementById('ssh-port-range-start-input');
+        const endEl = document.getElementById('ssh-port-range-end-input');
+        const rawStart = String(startEl ? startEl.value : '').trim();
+        const rawEnd = String(endEl ? endEl.value : '').trim();
+
+        const isBlank = !rawStart && !rawEnd;
+        const start = toValidPortNumber(rawStart);
+        const end = toValidPortNumber(rawEnd);
+        const isComplete = start !== null && end !== null;
+        const isValid = isComplete && start <= end;
+
+        return {
+            rawStart: rawStart,
+            rawEnd: rawEnd,
+            start: start,
+            end: end,
+            isBlank: isBlank,
+            isComplete: isComplete,
+            isValid: isValid,
+        };
+    }
+
+    function refreshSshPortRangePreview() {
+        const config = getSshPortRangeConfig();
+        const previewEl = document.getElementById('ssh-port-range-preview');
+        const statusEl = document.getElementById('ssh-port-range-status');
+
+        if (previewEl) {
+            if (config.isBlank) {
+                previewEl.value = [
+                    '# Leave blank to omit ports from YAML',
+                    'ports:',
+                    '  - 3022:22',
+                ].join('\n');
+            } else if (!config.isValid) {
+                previewEl.value = [
+                    '# Invalid SSH port range',
+                    '# Start and end must both be set, and start must be <= end',
+                ].join('\n');
+            } else {
+                previewEl.value = [
+                    '# Each node gets a sequential host port mapped to container port 22',
+                    'ports:',
+                    `  - ${config.start}:22`,
+                ].join('\n');
+            }
+        }
+
+        if (statusEl) {
+            if (config.isBlank) {
+                statusEl.textContent = 'No SSH port range configured. ports will be omitted from YAML.';
+                statusEl.style.color = '#64748b';
+            } else if (!config.isValid) {
+                statusEl.textContent = 'Invalid SSH port range. Set both start and end, and ensure start <= end.';
+                statusEl.style.color = '#b91c1c';
+            } else {
+                const count = (config.end - config.start) + 1;
+                statusEl.textContent = `Using SSH host ports ${config.start}-${config.end} (${count} slots). Each node maps to :22.`;
+                statusEl.style.color = '#64748b';
+            }
+        }
+
+        persistSshPortRangeConfig({ start: config.rawStart, end: config.rawEnd });
+        return config;
+    }
+
+    function initSshPortRangeSettingsUI() {
+        const stored = readStoredSshPortRangeConfig();
+        const startEl = document.getElementById('ssh-port-range-start-input');
+        const endEl = document.getElementById('ssh-port-range-end-input');
+
+        if (startEl) {
+            startEl.value = stored.start;
+            startEl.addEventListener('input', refreshSshPortRangePreview);
+            startEl.addEventListener('change', refreshSshPortRangePreview);
+        }
+        if (endEl) {
+            endEl.value = stored.end;
+            endEl.addEventListener('input', refreshSshPortRangePreview);
+            endEl.addEventListener('change', refreshSshPortRangePreview);
+        }
+
+        refreshSshPortRangePreview();
+    }
+
     function updateRemoteSessionState(session) {
         if (!session || typeof session !== 'object') return;
         if (Object.prototype.hasOwnProperty.call(session, 'serverUrl')) {
@@ -297,6 +514,150 @@
             remotePasswordCache = String(session.password || '');
             AppState.remote.passwordCache = remotePasswordCache;
         }
+    }
+
+    function readStoredDeployedExports() {
+        try {
+            const raw = localStorage.getItem(DEPLOYED_EXPORTS_KEY);
+            if (!raw) return {};
+            const parsed = JSON.parse(raw);
+            return (parsed && typeof parsed === 'object') ? parsed : {};
+        } catch (e) {
+            Logger.warn('Failed to read deployed export cache:', e);
+            return {};
+        }
+    }
+
+    function writeStoredDeployedExports(payload) {
+        try {
+            localStorage.setItem(DEPLOYED_EXPORTS_KEY, JSON.stringify(payload || {}));
+        } catch (e) {
+            Logger.warn('Failed to write deployed export cache:', e);
+        }
+    }
+
+    function persistDeployedExport(labId, exportData) {
+        const normalizedLabId = String(labId || '').trim();
+        if (!normalizedLabId || !exportData || typeof exportData !== 'object') return;
+        const cache = readStoredDeployedExports();
+        cache[normalizedLabId] = {
+            savedAt: Date.now(),
+            exportData: exportData,
+        };
+        writeStoredDeployedExports(cache);
+    }
+
+    function readDeployedExport(labId) {
+        const normalizedLabId = String(labId || '').trim();
+        if (!normalizedLabId) return null;
+        const cache = readStoredDeployedExports();
+        const entry = cache[normalizedLabId];
+        if (!entry || typeof entry !== 'object') return null;
+        const exportData = entry.exportData;
+        return (exportData && typeof exportData === 'object') ? exportData : null;
+    }
+
+    function deleteDeployedExport(labId) {
+        const normalizedLabId = String(labId || '').trim();
+        if (!normalizedLabId) return;
+        const cache = readStoredDeployedExports();
+        if (!Object.prototype.hasOwnProperty.call(cache, normalizedLabId)) return;
+        delete cache[normalizedLabId];
+        writeStoredDeployedExports(cache);
+    }
+
+    function parseHostPortFromYamlPortMapping(portMapping) {
+        const text = String(portMapping || '').trim();
+        if (!text) return null;
+
+        const withoutProto = text.split('/')[0].trim();
+        const parts = withoutProto.split(':').map(function(part) { return String(part || '').trim(); }).filter(Boolean);
+        if (parts.length < 2) return null;
+
+        const hostPort = Number(parts.length === 2 ? parts[0] : parts[parts.length - 2]);
+        if (!Number.isFinite(hostPort) || hostPort <= 0) return null;
+        return Math.trunc(hostPort);
+    }
+
+    function buildYamlPortIndex(exportData) {
+        const index = {};
+        const nodes = exportData && exportData.topology && exportData.topology.nodes && typeof exportData.topology.nodes === 'object'
+            ? exportData.topology.nodes
+            : {};
+
+        Object.keys(nodes).forEach(function(nodeName) {
+            const node = nodes[nodeName] || {};
+            const portMappings = Array.isArray(node.ports) ? node.ports : [];
+            for (let i = 0; i < portMappings.length; i += 1) {
+                const hostPort = parseHostPortFromYamlPortMapping(portMappings[i]);
+                if (hostPort) {
+                    index[String(nodeName || '').trim()] = hostPort;
+                    break;
+                }
+            }
+        });
+
+        return index;
+    }
+
+    function buildSequentialYamlPortIndex(nodeNames) {
+        const config = getSshPortRangeConfig();
+        if (!config.isValid) return {};
+
+        const normalizedNodeNames = Array.isArray(nodeNames)
+            ? nodeNames.map(function(name) { return String(name || '').trim(); }).filter(Boolean).sort(function(a, b) {
+                return a.localeCompare(b);
+            })
+            : [];
+
+        const index = {};
+        normalizedNodeNames.forEach(function(nodeName, offset) {
+            const hostPort = config.start + offset;
+            if (hostPort > config.end) return;
+            index[nodeName] = hostPort;
+        });
+        return index;
+    }
+
+    function resolveYamlPortIndexForLab(labId, runtimeNodes) {
+        const deployedExport = readDeployedExport(labId);
+        const fromCache = buildYamlPortIndex(deployedExport);
+        if (Object.keys(fromCache).length > 0) {
+            return {
+                portIndex: fromCache,
+                source: 'deployed YAML cache',
+            };
+        }
+
+        const currentExport = buildExportTopologyData();
+        const currentExportLabName = String(currentExport && currentExport.name || '').trim();
+        if (currentExport && currentExportLabName === String(labId || '').trim()) {
+            const fromCurrentExport = buildYamlPortIndex(currentExport);
+            if (Object.keys(fromCurrentExport).length > 0) {
+                return {
+                    portIndex: fromCurrentExport,
+                    source: 'current editor YAML',
+                };
+            }
+        }
+
+        const shortNames = Array.isArray(runtimeNodes)
+            ? runtimeNodes.map(function(nodeRuntime) {
+                return shortenRuntimeNodeName(labId, nodeRuntime && nodeRuntime.name);
+            })
+            : [];
+        const fromRange = buildSequentialYamlPortIndex(shortNames);
+        if (Object.keys(fromRange).length > 0) {
+            return {
+                portIndex: fromRange,
+                source: 'configured port range',
+            };
+        }
+
+        return {
+            portIndex: {},
+            source: 'none',
+        };
     }
 
     function getLabIdFromInput() {
@@ -357,7 +718,7 @@
             updateCurrentLabId(runtime.lab_id || runtime.lab_name || targetLabId);
             const summary = summarizeLabState(runtime);
             setLabRuntimeIndicator(summary.status, summary.detail);
-            refreshDeploymentAccessPanel(currentLabId).catch(function(error) {
+            refreshDeploymentAccessPanel(currentLabId, { silent: true }).catch(function(error) {
                 Logger.warn('Failed to auto-refresh deployment access panel:', error);
             });
             return runtime;
@@ -1433,7 +1794,7 @@
                 ensureClabResponseOk(graphResponse, graphPayload, `Failed to fetch graph for ${currentLabId}`);
                 const graph = (graphPayload && typeof graphPayload === 'object') ? graphPayload : { nodes: [], links: [] };
                 const applied = await applySavedNodePositionsToGraph(graph, currentLabId);
-                refreshDeploymentAccessPanel(currentLabId).catch(function(error) {
+                refreshDeploymentAccessPanel(currentLabId, { silent: true }).catch(function(error) {
                     Logger.warn('Failed to auto-refresh deployment access panel:', error);
                 });
                 return ensureGraphDebugLabels(applied);
@@ -1511,6 +1872,7 @@
 
             const removedLabId = targetLabId;
             updateCurrentLabId(null);
+            deleteDeployedExport(removedLabId);
             setDeploymentAccessStatus(
                 cleanup
                     ? `${removedLabId} destroyed and cleaned. No connectable instances.`
@@ -3260,7 +3622,7 @@
         // Refresh YAML modal if it is currently open
         const yamlModal = document.getElementById('yamlModal');
         if (yamlModal && yamlModal.classList.contains('open')) {
-            document.getElementById('yaml-output').value = generateYAML();
+            refreshExportModalOutput();
         }
     }
 
@@ -4137,36 +4499,162 @@
      * Generate containerlab YAML string from current topology
      */
     function generateYAML() {
-        const { labName, nodes, links } = getCurrentTopologyData();
+        const exportData = buildExportTopologyData();
+        if (!exportData) return '# No nodes in topology';
 
-        if (nodes.length === 0) return '# No nodes in topology';
+        const exportedAt = new Date().toISOString();
+        const mgmt = (exportData.mgmt && typeof exportData.mgmt === 'object') ? exportData.mgmt : null;
+        const nodesByName = exportData.topology.nodes || {};
+        const links = Array.isArray(exportData.topology.links) ? exportData.topology.links : [];
 
-        let yaml = `name: ${labName}\n\ntopology:\n  nodes:\n`;
-        for (const n of nodes) {
-            yaml += `    ${n.name}:\n`;
-            yaml += `      kind: ${n.kind}\n`;
-            if (n.image) yaml += `      image: ${n.image}\n`;
+        let yaml = `# exported_at: ${exportedAt}\nname: ${exportData.name}\n`;
+        if (mgmt) {
+            yaml += `\nmgmt:\n`;
+            yaml += `  network: ${mgmt.network}\n`;
+            yaml += `  ipv4-subnet: ${mgmt['ipv4-subnet']}\n`;
         }
-
-        const nodeKindById = new Map();
-        for (const n of nodes) {
-            nodeKindById.set(String(n.id), n.kind);
-            nodeKindById.set(String(n.name), n.kind);
-        }
+        yaml += `\ntopology:\n  nodes:\n`;
+        Object.keys(nodesByName).forEach(function(nodeName) {
+            const node = nodesByName[nodeName] || {};
+            yaml += `    ${nodeName}:\n`;
+            yaml += `      kind: ${node.kind}\n`;
+            if (node.image) yaml += `      image: ${node.image}\n`;
+            if (Array.isArray(node.ports) && node.ports.length > 0) {
+                yaml += `      ports:\n`;
+                node.ports.forEach(function(portMapping) {
+                    yaml += `        - "${String(portMapping)}"\n`;
+                });
+            }
+        });
 
         yaml += `\n  links:\n`;
         if (links.length === 0) {
             yaml += `    []  # no links defined\n`;
         } else {
-            for (const l of links) {
-                const srcKind = nodeKindById.get(String(l.source)) || '';
-                const tgtKind = nodeKindById.get(String(l.target)) || '';
-                const srcIfName = normalizeInterfaceNameForYaml(srcKind, l.srcIfName);
-                const tgtIfName = normalizeInterfaceNameForYaml(tgtKind, l.tgtIfName);
-                yaml += `    - endpoints: ["${l.source}:${srcIfName}", "${l.target}:${tgtIfName}"]\n`;
-            }
+            links.forEach(function(link) {
+                const endpoints = Array.isArray(link.endpoints) ? link.endpoints : [];
+                if (endpoints.length < 2) return;
+                yaml += `    - endpoints: ["${endpoints[0]}", "${endpoints[1]}"]\n`;
+            });
         }
 
+        return yaml;
+    }
+
+    function buildExportTopologyData() {
+        const { labName, nodes, links } = getCurrentTopologyData();
+        if (!Array.isArray(nodes) || nodes.length === 0) return null;
+        const mgmtConfig = refreshMgmtNetworkPreview();
+        const sshPortRangeConfig = refreshSshPortRangePreview();
+
+        const sortedNodes = nodes.slice().sort(function(a, b) {
+            return String(a.name || '').localeCompare(String(b.name || ''));
+        });
+
+        const nodesByName = {};
+        const nodeKindById = new Map();
+        sortedNodes.forEach(function(n, index) {
+            const nodeName = String(n.name || '').trim();
+            if (!nodeName) return;
+            const nodePayload = {
+                kind: String(n.kind || 'linux'),
+                image: String(n.image || '').trim(),
+            };
+            if (sshPortRangeConfig.isValid) {
+                const hostPort = sshPortRangeConfig.start + index;
+                if (hostPort <= sshPortRangeConfig.end) {
+                    nodePayload.ports = [`${hostPort}:22`];
+                }
+            }
+            nodesByName[nodeName] = {
+                kind: nodePayload.kind,
+                image: nodePayload.image,
+            };
+            if (Array.isArray(nodePayload.ports) && nodePayload.ports.length > 0) {
+                nodesByName[nodeName].ports = nodePayload.ports;
+            }
+            nodeKindById.set(String(n.id || '').trim(), String(n.kind || ''));
+            nodeKindById.set(nodeName, String(n.kind || ''));
+        });
+
+        const dedupedLinks = [];
+        const seenLinkKeys = new Set();
+        links.forEach(function(l) {
+            const srcNode = String(l.source || '').trim();
+            const tgtNode = String(l.target || '').trim();
+            if (!srcNode || !tgtNode) return;
+
+            const srcKind = nodeKindById.get(srcNode) || '';
+            const tgtKind = nodeKindById.get(tgtNode) || '';
+            const srcIfName = normalizeInterfaceNameForYaml(srcKind, l.srcIfName);
+            const tgtIfName = normalizeInterfaceNameForYaml(tgtKind, l.tgtIfName);
+            const endpointA = `${srcNode}:${srcIfName}`;
+            const endpointB = `${tgtNode}:${tgtIfName}`;
+            const canonical = [endpointA, endpointB].sort();
+            const linkKey = `${canonical[0]}||${canonical[1]}`;
+            if (seenLinkKeys.has(linkKey)) return;
+            seenLinkKeys.add(linkKey);
+            dedupedLinks.push({ endpoints: canonical });
+        });
+
+        dedupedLinks.sort(function(a, b) {
+            const a0 = String((a.endpoints && a.endpoints[0]) || '');
+            const b0 = String((b.endpoints && b.endpoints[0]) || '');
+            const first = a0.localeCompare(b0);
+            if (first !== 0) return first;
+            const a1 = String((a.endpoints && a.endpoints[1]) || '');
+            const b1 = String((b.endpoints && b.endpoints[1]) || '');
+            return a1.localeCompare(b1);
+        });
+
+        return {
+            name: String(labName || 'my-lab'),
+            mgmt: {
+                network: mgmtConfig.name,
+                'ipv4-subnet': mgmtConfig.ipv4Subnet,
+            },
+            topology: {
+                nodes: nodesByName,
+                links: dedupedLinks,
+            },
+        };
+    }
+
+    function generateJSONExport() {
+        const exportData = buildExportTopologyData();
+        if (!exportData) return '{\n  "message": "No nodes in topology"\n}';
+        return JSON.stringify(exportData, null, 2);
+    }
+
+    function setExportFormat(format) {
+        exportPreviewFormat = (format === 'json') ? 'json' : 'yaml';
+        const yamlTab = document.getElementById('export-tab-yaml');
+        const jsonTab = document.getElementById('export-tab-json');
+        if (yamlTab) yamlTab.classList.toggle('active', exportPreviewFormat === 'yaml');
+        if (jsonTab) jsonTab.classList.toggle('active', exportPreviewFormat === 'json');
+
+        const copyBtn = document.getElementById('export-copy-btn');
+        const downloadBtn = document.getElementById('export-download-btn');
+        if (copyBtn) copyBtn.textContent = exportPreviewFormat === 'json' ? 'Copy JSON' : 'Copy YAML';
+        if (downloadBtn) downloadBtn.textContent = exportPreviewFormat === 'json' ? 'Download JSON' : 'Download YAML';
+
+        refreshExportModalOutput();
+    }
+
+    function refreshExportModalOutput() {
+        const outputEl = document.getElementById('yaml-output');
+        if (!outputEl) return '';
+        const content = exportPreviewFormat === 'json' ? generateJSONExport() : generateYAML();
+        outputEl.value = content;
+        return content;
+    }
+
+    function getSyncedYamlForExportAndDeploy() {
+        const yaml = generateYAML();
+        const outputEl = document.getElementById('yaml-output');
+        if (outputEl) {
+            outputEl.value = exportPreviewFormat === 'json' ? generateJSONExport() : yaml;
+        }
         return yaml;
     }
 
@@ -4174,7 +4662,9 @@
      * Open YAML export modal with generated content
      */
     function openExportYAML() {
-        document.getElementById('yaml-output').value = generateYAML();
+        // Always regenerate from the current canvas state for each open action.
+        setExportFormat(exportPreviewFormat || 'yaml');
+        getSyncedYamlForExportAndDeploy();
         document.getElementById('yamlModal').classList.add('open');
     }
 
@@ -4183,22 +4673,24 @@
      */
     function copyYAML() {
         const ta = document.getElementById('yaml-output');
+        if (!ta) return;
+        refreshExportModalOutput();
         ta.select();
         document.execCommand('copy');
-        alert('YAML copied to clipboard');
+        alert(exportPreviewFormat === 'json' ? 'JSON copied to clipboard' : 'YAML copied to clipboard');
     }
 
     /**
      * Download YAML as a file
      */
     function downloadYAML() {
-        const content = document.getElementById('yaml-output').value;
+        const content = refreshExportModalOutput();
         const labName = (document.getElementById('lab-name-input') || {}).value || 'topology';
         const blob = new Blob([content], { type: 'text/plain' });
         const url  = URL.createObjectURL(blob);
         const a    = document.createElement('a');
         a.href     = url;
-        a.download = `${labName}.clab.yaml`;
+        a.download = exportPreviewFormat === 'json' ? `${labName}.clab.json` : `${labName}.clab.yaml`;
         a.click();
         URL.revokeObjectURL(url);
     }
@@ -4269,20 +4761,28 @@
     function setDeploymentAccessStatus(message, isError) {
         const statusEl = document.getElementById('deploy-access-status');
         if (!statusEl) return;
-        statusEl.textContent = message || '';
-        statusEl.style.color = isError ? '#b91c1c' : '#64748b';
+        const nextMessage = String(message || '');
+        const nextColor = isError ? '#b91c1c' : '#64748b';
+        const nextKey = `${nextColor}::${nextMessage}`;
+        if (lastDeploymentAccessStatusKey === nextKey) return;
+        statusEl.textContent = nextMessage;
+        statusEl.style.color = nextColor;
+        lastDeploymentAccessStatusKey = nextKey;
     }
 
     function renderDeploymentAccessRows(rows) {
         const body = document.getElementById('deploy-access-body');
         if (!body) return;
+        const list = Array.isArray(rows) ? rows : [];
+        const nextKey = JSON.stringify(list);
+        if (lastDeploymentAccessRowsKey === nextKey) return;
+        lastDeploymentAccessRowsKey = nextKey;
 
         if (RenderHelpers && typeof RenderHelpers.buildDeploymentAccessRows === 'function') {
             body.innerHTML = RenderHelpers.buildDeploymentAccessRows(rows, escapeHtml);
             return;
         }
 
-        const list = Array.isArray(rows) ? rows : [];
         if (list.length === 0) {
             body.innerHTML = '<tr><td colspan="2">No deployed instances.</td></tr>';
             return;
@@ -4382,8 +4882,9 @@
         throw lastError || new Error(`Failed to request SSH for ${shortNodeName || fullNodeName}`);
     }
 
-    async function refreshDeploymentAccessPanel(labIdHint) {
+    async function refreshDeploymentAccessPanel(labIdHint, options) {
         const labId = String(labIdHint || currentLabId || getLabIdFromInput() || '').trim();
+        const silent = !!(options && options.silent);
         if (!labId) {
             setDeploymentAccessStatus('No lab selected. Deploy first.', true);
             renderDeploymentAccessRows([]);
@@ -4392,7 +4893,9 @@
 
         deploymentAccessPanelRequested = true;
         setDeploymentAccessPanelVisible(true);
-        setDeploymentAccessStatus(`Loading SSH endpoints for ${labId}...`, false);
+        if (!silent) {
+            setDeploymentAccessStatus(`Loading SSH endpoints for ${labId}...`, false);
+        }
 
         try {
             const response = await clabFetch(`/labs/${encodeURIComponent(labId)}`);
@@ -4400,6 +4903,8 @@
             ensureClabResponseOk(response, payload, `Failed to inspect lab ${labId}`);
             const runtime = (payload && typeof payload === 'object') ? payload : {};
             const runtimeNodes = Array.isArray(runtime.nodes_runtime) ? runtime.nodes_runtime : [];
+            const portResolution = resolveYamlPortIndexForLab(labId, runtimeNodes);
+            const yamlPortIndex = portResolution.portIndex;
 
             if (runtimeNodes.length === 0) {
                 renderDeploymentAccessRows([]);
@@ -4414,11 +4919,11 @@
                 const kind = kindByName[shortName] || kindByName[fullNodeName] || '';
                 const loginName = getMappedLoginNameForKind(kind) || String(defaultLoginName || 'admin').trim() || 'admin';
 
-                const sshPort = Number(nodeRuntime && nodeRuntime.ssh_port);
+                const sshPort = Number(yamlPortIndex[shortName] || yamlPortIndex[fullNodeName]);
                 if (!Number.isFinite(sshPort) || sshPort <= 0) {
                     return {
                         hostname: shortName || fullNodeName,
-                        error: 'ssh_port missing in inspect response',
+                        error: 'ports missing in deployed YAML',
                     };
                 }
 
@@ -4448,8 +4953,8 @@
                 return String(a.hostname || '').localeCompare(String(b.hostname || ''));
             });
             renderDeploymentAccessRows(rows);
-            const successCount = rows.filter(function(item) { return !!item.uri; }).length;
-            setDeploymentAccessStatus(`Loaded ${successCount}/${rows.length} SSH URIs for ${labId}.`, successCount === 0);
+            const hasAnyUri = rows.some(function(item) { return !!item.uri; });
+            setDeploymentAccessStatus('', !hasAnyUri);
         } catch (error) {
             renderDeploymentAccessRows([]);
             setDeploymentAccessStatus(`Failed to load instance access info: ${error.message || error}`, true);
@@ -4466,7 +4971,8 @@
      * Deploy the currently-drawn topology to clab-api-server
      */
     async function deployCurrentTopology() {
-        const yamlContent = generateYAML();
+        const exportData = buildExportTopologyData();
+        const yamlContent = getSyncedYamlForExportAndDeploy();
         if (!yamlContent || yamlContent.startsWith('# No nodes')) {
             alert('No nodes to deploy. Add nodes first.');
             return;
@@ -4475,6 +4981,9 @@
         try {
             const result = await deployTopologyFromYAML(yamlContent);
             const deployedLabId = result.lab_id || result.lab_name || getLabIdFromInput() || 'success';
+            if (exportData) {
+                persistDeployedExport(deployedLabId, exportData);
+            }
             await refreshCurrentLabStatus(deployedLabId);
             RemoteSessionManager.startLabStatusPolling();
             alert(`Lab deployed: ${deployedLabId}`);
@@ -4609,6 +5118,7 @@
         confirmLinkInterfaceSelection,
         cancelLinkInterfaceSelection,
         openExportYAML,
+        setExportFormat,
         copyYAML,
         downloadYAML,
         generateYAML,
@@ -4631,6 +5141,8 @@
         topologyApp = new nx.ui.Application({
             el: document.getElementById('topology')
         });
+        initMgmtNetworkSettingsUI();
+        initSshPortRangeSettingsUI();
         initKindImageRegistryUI();
         initTopology();
         const shell = new Shell();

@@ -125,99 +125,6 @@ class ClabAPIClient:
 
         return None
 
-    @staticmethod
-    def _node_name_candidates(lab_name: str, node_name: str) -> List[str]:
-        raw_lab = str(lab_name or "").strip()
-        raw_node = str(node_name or "").strip()
-        if not raw_node:
-            return []
-        prefix = f"clab-{raw_lab}-" if raw_lab else ""
-        candidates = {raw_node}
-        if prefix and raw_node.startswith(prefix):
-            candidates.add(raw_node[len(prefix):])
-        elif prefix:
-            candidates.add(f"{prefix}{raw_node}")
-        return [c for c in candidates if c]
-
-    def _extract_ssh_session_port(self, session: Dict[str, Any]) -> Optional[int]:
-        fields = [
-            "ssh_port", "sshPort", "port", "host_port", "hostPort",
-            "published_port", "publishedPort", "local_port", "localPort",
-        ]
-        for field in fields:
-            parsed = self._to_positive_int(session.get(field))
-            if parsed:
-                return parsed
-        return None
-
-    def _extract_ssh_session_node_name(self, session: Dict[str, Any]) -> str:
-        fields = ["node_name", "nodeName", "node", "container_name", "containerName", "name"]
-        for field in fields:
-            value = str(session.get(field) or "").strip()
-            if value:
-                return value
-        return ""
-
-    async def _get_ssh_session_port_index(self, lab_name: str) -> Dict[str, int]:
-        """Get node->ssh_port map from /api/v1/ssh/sessions when available."""
-        response = await self.http_client.get("/api/v1/ssh/sessions")
-        if response.status_code in (404, 405):
-            return {}
-        response.raise_for_status()
-        payload = response.json()
-
-        sessions: List[Dict[str, Any]] = []
-        if isinstance(payload, list):
-            sessions = [item for item in payload if isinstance(item, dict)]
-        elif isinstance(payload, dict):
-            for key in ("sessions", "data", "items", "results"):
-                value = payload.get(key)
-                if isinstance(value, list):
-                    sessions = [item for item in value if isinstance(item, dict)]
-                    break
-
-        index: Dict[str, int] = {}
-        for session in sessions:
-            session_lab = str(
-                session.get("lab")
-                or session.get("lab_name")
-                or session.get("labName")
-                or ""
-            ).strip()
-            if session_lab and session_lab != str(lab_name or "").strip():
-                continue
-
-            node_name = self._extract_ssh_session_node_name(session)
-            port = self._extract_ssh_session_port(session)
-            if not node_name or not port:
-                continue
-
-            for key in self._node_name_candidates(lab_name, node_name):
-                index[key] = port
-
-        return index
-
-    async def _enrich_runtime_with_ssh_sessions(self, runtime: RuntimeLabState) -> RuntimeLabState:
-        try:
-            port_index = await self._get_ssh_session_port_index(runtime.lab_name)
-        except Exception:
-            # SSH session endpoint may be unavailable depending on server version.
-            return runtime
-
-        if not port_index:
-            return runtime
-
-        for node in runtime.nodes_runtime:
-            matched_port = None
-            for key in self._node_name_candidates(runtime.lab_name, node.name):
-                if key in port_index:
-                    matched_port = port_index[key]
-                    break
-            if matched_port:
-                node.ssh_port = matched_port
-                node.ssh_reachable = True
-        return runtime
-
     def set_auth_token(self, token: str) -> None:
         self.auth_token = token
         self._refresh_headers()
@@ -320,6 +227,43 @@ class ClabAPIClient:
         containers = data if isinstance(data, list) else []
         return self._containers_to_runtime_lab(containers, lab_name)
 
+    async def deploy_lab_from_yaml_text(
+        self, yaml_text: str, lab_name: str
+    ) -> RuntimeLabState:
+        """POST /api/v1/labs - Deploy lab by forwarding YAML text 그대로 as topologyContent."""
+        response = await self.http_client.post(
+            "/api/v1/labs",
+            json={"topologyContent": str(yaml_text)},
+        )
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            detail = ""
+            content_type = (response.headers.get("content-type") or "").lower()
+            if "application/json" in content_type:
+                try:
+                    parsed = response.json()
+                    if isinstance(parsed, dict):
+                        detail = str(parsed.get("detail") or parsed.get("error") or parsed)
+                    else:
+                        detail = str(parsed)
+                except Exception:
+                    detail = response.text
+            else:
+                detail = response.text
+            detail = (detail or "").strip()
+            if detail:
+                raise RuntimeError(
+                    f"Remote deploy failed ({response.status_code}) at {response.request.url}: {detail}"
+                ) from e
+            raise RuntimeError(
+                f"Remote deploy failed ({response.status_code}) at {response.request.url}"
+            ) from e
+
+        data = response.json()
+        containers = data if isinstance(data, list) else []
+        return self._containers_to_runtime_lab(containers, lab_name)
+
     async def list_labs(self) -> List[Dict[str, Any]]:
         """GET /api/v1/labs - List all running labs"""
         response = await self.http_client.get("/api/v1/labs")
@@ -335,9 +279,7 @@ class ClabAPIClient:
         response.raise_for_status()
         data = response.json()
         containers = data if isinstance(data, list) else []
-        runtime = self._containers_to_runtime_lab(containers, lab_name)
-        runtime = await self._enrich_runtime_with_ssh_sessions(runtime)
-        return runtime
+        return self._containers_to_runtime_lab(containers, lab_name)
 
     async def destroy_lab(self, lab_name: str, cleanup: bool = False) -> bool:
         """DELETE /api/v1/labs/{labName} - Destroy a lab."""
